@@ -1,0 +1,170 @@
+{
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "ace_step_1.5_turbo_aio.safetensors"
+    },
+    "_meta": {
+      "title": "ACE-Step 1.5 turbo (AIO)"
+    }
+  },
+  "2": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+      "shift": 3.0,
+      "model": [
+        "1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Model sampling (shift 3)"
+    }
+  },
+  "3": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "input.wav"
+    },
+    "_meta": {
+      "title": "Music file"
+    }
+  },
+  "4": {
+    "class_type": "AudioContinueExtend",
+    "inputs": {
+      "add_seconds": 30.0,
+      "mask_mode": "generate_new_only",
+      "repaint_seconds": 0.0,
+      "audio": [
+        "3",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    },
+    "_meta": {
+      "title": "Add seconds"
+    }
+  },
+  "5": {
+    "class_type": "TextEncodeAceStepAudio1.5",
+    "inputs": {
+      "tags": "instrumental, continues the existing song, same tempo, same key, same instruments, same mix and reverb, natural musical development, smooth transition, studio quality",
+      "lyrics": "",
+      "seed": 31,
+      "bpm": 120,
+      "duration": [
+        "4",
+        3
+      ],
+      "timesignature": "4",
+      "language": "en",
+      "keyscale": "C major",
+      "generate_audio_codes": true,
+      "cfg_scale": 2.0,
+      "temperature": 0.85,
+      "top_p": 0.9,
+      "top_k": 0,
+      "min_p": 0.0,
+      "clip": [
+        "1",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "Style + lyrics"
+    }
+  },
+  "6": {
+    "class_type": "ConditioningZeroOut",
+    "inputs": {
+      "conditioning": [
+        "5",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Negative (zero out)"
+    }
+  },
+  "7": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 31,
+      "steps": 8,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "model": [
+        "2",
+        0
+      ],
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "6",
+        0
+      ],
+      "latent_image": [
+        "4",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Sampler"
+    }
+  },
+  "8": {
+    "class_type": "VAEDecodeAudio",
+    "inputs": {
+      "samples": [
+        "7",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    },
+    "_meta": {
+      "title": "Decode"
+    }
+  },
+  "9": {
+    "class_type": "AudioContinueStitch",
+    "inputs": {
+      "crossfade_seconds": 1.0,
+      "output_sample_rate": "highest",
+      "source_audio": [
+        "3",
+        0
+      ],
+      "continued_audio": [
+        "8",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Stitch original + continuation"
+    }
+  },
+  "10": {
+    "class_type": "SaveAudio",
+    "inputs": {
+      "filename_prefix": "audio-continue/audio",
+      "audio": [
+        "9",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Save"
+    }
+  }
+}
