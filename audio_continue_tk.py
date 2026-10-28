@@ -28,6 +28,7 @@ import json
 import mimetypes
 import os
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -110,6 +111,23 @@ AUDIO_EXTENSIONS = (
     ".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".aif", ".aiff", ".wma",
 )
 
+# files next to the track that the app offers as the prompt, in this order
+PROMPT_SIDECAR_SUFFIXES = (
+    ".prompt.txt", ".caption.txt", ".description.txt", ".tags.txt", ".txt",
+)
+PROMPT_SIDECAR_JSON = (".json", ".prompt.json")
+PROMPT_JSON_KEYS = (
+    "prompt", "caption", "tags", "description", "music_description", "style", "genre",
+)
+
+# captioner nodes shipped by this repo, best first (see CAPTIONER.md)
+CAPTIONER_PREFERENCE = ("MusicCaptionMerge", "MusicCaptionAnalyze", "MusicCaptionMOSS")
+CAPTIONER_TAP = "MusicCaptionTap"
+# any third-party node whose name/display name/category mentions one of these and
+# that takes an AUDIO input and returns STRINGs is offered as a captioner
+CAPTIONER_HINTS = ("caption", "scribe", "analy", "music info", "music_info", "describe", "tagger")
+MOSS_DEFAULT_URL = "http://127.0.0.1:30000"
+
 DEFAULT_TAGS = (
     "instrumental, continues the existing song, same tempo, same key, same instruments, "
     "same mix and reverb, natural musical development, smooth transition, studio quality"
@@ -134,6 +152,14 @@ class Settings:
     comfy_url: str = "http://127.0.0.1:8188"
     workflow: str = DEFAULT_WORKFLOW
     audio_file: str = ""
+    prompt_file: str = ""
+    prompt_append: bool = True
+    auto_prompt_file: bool = True
+    captioner: str = "auto"
+    captioner_url: str = MOSS_DEFAULT_URL
+    auto_caption: bool = False
+    caption_prefer_numeric: str = "dsp"
+    caption_fill_lyrics: bool = False
     add_seconds: float = 30.0
     tags: str = DEFAULT_TAGS
     lyrics: str = ""
@@ -154,7 +180,8 @@ class Settings:
     window_geometry: str = ""
 
 
-def load_settings(path=CONFIG_PATH):
+def load_settings(path=None):
+    path = path or CONFIG_PATH
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
@@ -166,7 +193,8 @@ def load_settings(path=CONFIG_PATH):
     return Settings(**{k: v for k, v in data.items() if k in known})
 
 
-def save_settings(settings, path=CONFIG_PATH):
+def save_settings(settings, path=None):
+    path = path or CONFIG_PATH
     try:
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -437,6 +465,624 @@ def patch_workflow(workflow, settings, uploaded_name=None):
     return patched
 
 
+# --------------------------------------------------------------------------------------
+# prompt files
+# --------------------------------------------------------------------------------------
+
+
+def find_prompt_file(audio_path):
+    """Look for a prompt sidecar next to `audio_path`; return the first hit or "".
+
+    `song.flac` -> song.prompt.txt, song.caption.txt, song.description.txt,
+    song.tags.txt, song.txt, song.json (with a prompt/caption/tags key).
+    """
+    if not audio_path:
+        return ""
+    stem = os.path.splitext(os.path.abspath(audio_path))[0]
+    candidates = [stem + suffix for suffix in PROMPT_SIDECAR_SUFFIXES]
+    candidates += [stem + suffix for suffix in PROMPT_SIDECAR_JSON]
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            if os.path.getsize(path) == 0:
+                continue
+        except OSError:
+            continue
+        if read_prompt_file(path):
+            return path
+    return ""
+
+
+def read_prompt_file(path):
+    """Read a prompt from a .txt/.md or a metadata .json file. Returns "" if unusable."""
+    if not path:
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            raw = fh.read()
+    except OSError:
+        return ""
+    text = raw.strip()
+    if not text:
+        return ""
+    if path.lower().endswith(".json") or text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return text
+        if isinstance(data, str):
+            return data.strip()
+        if isinstance(data, list):
+            joined = ", ".join(str(item) for item in data if str(item).strip())
+            return joined.strip()
+        if isinstance(data, dict):
+            for key in PROMPT_JSON_KEYS:
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+                if isinstance(value, list) and value and isinstance(value[0], str):
+                    return ", ".join(item.strip() for item in value if item.strip())
+            return ""
+    return text
+
+
+def merge_prompt_text(base, extra, append=True):
+    """Merge two tag/description strings, de-duplicating comma tokens.
+
+    `append=False` means `extra` replaces `base` (that is what the checkbox in
+    the GUI switches between).
+    """
+    base = (base or "").strip()
+    extra = (extra or "").strip()
+    if not extra:
+        return base
+    if not base or not append:
+        return extra
+    seen = set()
+    parts = []
+    for chunk in (base, extra):
+        for raw in re.split(r"[,\n]", chunk):
+            tag = re.sub(r"\s+", " ", raw).strip().strip(",;")
+            if not tag or tag.lower() in seen:
+                continue
+            seen.add(tag.lower())
+            parts.append(tag)
+    return ", ".join(parts)
+
+
+def _pitches():
+    return ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+def normalize_keyscale(value):
+    """'am', 'A min', 'A minor' -> 'A minor'; 'Bb' -> 'A# major' (ACE-Step spelling)."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.lower() in ("auto", "none", "null", "unknown", "n/a", "atonal"):
+        return ""
+    match = re.search(
+        r"(?<![a-z#])([a-g])\s*(#|♯|b|♭)?\s*(major|maj|minor|min|ionian|aeolian|m|dur|moll)?\b",
+        text.lower(),
+    )
+    if not match:
+        return ""
+    letter, accidental, quality = match.groups()
+    pitch = letter.upper()
+    if accidental in ("#", "♯"):
+        pitch += "#"
+    elif accidental in ("b", "♭"):
+        flat = (letter + "b").upper()
+        mapping = {"CB": "B", "DB": "C#", "EB": "D#", "FB": "E", "GB": "F#",
+                   "AB": "G#", "BB": "A#"}
+        if flat not in mapping:
+            return ""
+        pitch = mapping[flat]
+    if pitch not in _pitches():
+        return ""
+    mode = "minor" if quality in ("minor", "min", "aeolian", "m", "moll") else "major"
+    candidate = f"{pitch} {mode}"
+    return candidate if candidate in KEYS else f"{pitch} major"
+
+
+def normalize_bpm(value, default=0):
+    if value is None or isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        match = re.search(r"(\d+(?:[.,]\d+)?)", str(value))
+        if not match:
+            return default
+        number = float(match.group(1).replace(",", "."))
+    if number <= 0:
+        return default
+    number = int(round(number))
+    return number if 20 <= number <= 400 else default
+
+
+# --------------------------------------------------------------------------------------
+# captioner discovery (node names come from the live ComfyUI /object_info)
+# --------------------------------------------------------------------------------------
+
+
+_MISSING = object()
+
+
+def _spec_type(spec):
+    """The declared type of an object_info input spec ('AUDIO', 'STRING', ...)."""
+    if not isinstance(spec, (list, tuple)) or not spec:
+        return ""
+    kind = spec[0]
+    if isinstance(kind, str):
+        return kind.upper()
+    if isinstance(kind, list):
+        return "COMBO"
+    return ""
+
+
+def _spec_default(spec):
+    kind = _spec_type(spec)
+    options = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+    if kind == "COMBO":
+        choices = spec[0]
+        default = options.get("default")
+        if default is not None and default in choices:
+            return default
+        if choices:
+            return choices[0]
+        return _MISSING
+    if kind in ("INT", "FLOAT", "STRING", "BOOLEAN"):
+        if "default" in options:
+            return options["default"]
+        return {"INT": 0, "FLOAT": 0.0, "STRING": "", "BOOLEAN": False}[kind]
+    return _MISSING
+
+
+def _node_specs(entry):
+    inputs = (entry or {}).get("input") or {}
+    specs = {}
+    for section in ("required", "optional"):
+        for name, spec in (inputs.get(section) or {}).items():
+            specs[name] = spec
+    return specs
+
+
+def _required_names(entry):
+    return set(((entry or {}).get("input") or {}).get("required") or {})
+
+
+def _string_output_indices(entry):
+    outputs = (entry or {}).get("output") or []
+    names = (entry or {}).get("output_name") or []
+    found = []
+    for index, kind in enumerate(outputs):
+        if str(kind).upper() in ("STRING", "*"):
+            found.append((index, names[index] if index < len(names) else f"output_{index}"))
+    return found
+
+
+def captioner_candidates(object_info):
+    """Third-party captioner nodes present on the server, best guess first."""
+    found = []
+    for name, entry in (object_info or {}).items():
+        if name in CAPTIONER_PREFERENCE or name == CAPTIONER_TAP:
+            continue
+        specs = _node_specs(entry)
+        if not any(_spec_type(spec) == "AUDIO" for spec in specs.values()):
+            continue
+        if not _string_output_indices(entry):
+            continue
+        label = str(entry.get("display_name") or name)
+        haystack = " ".join(
+            (name, label, str(entry.get("category") or ""), str(entry.get("description") or ""))
+        ).lower()
+        if not any(hint in haystack for hint in CAPTIONER_HINTS):
+            continue
+        score = 0
+        if "key" in haystack or "bpm" in haystack:
+            score += 2
+        if "caption" in haystack:
+            score += 1
+        outputs = " ".join(str(n).lower() for _, n in _string_output_indices(entry))
+        if "bpm" in outputs:
+            score += 2
+        if "key" in outputs:
+            score += 2
+        found.append({"class": name, "label": label, "score": score})
+    found.sort(key=lambda item: (-item["score"], item["class"].lower()))
+    return found
+
+
+def captioner_plan(object_info, requested="auto"):
+    """Decide how to caption: {'mode': native|tap|none, 'class', 'label', 'reason'}."""
+    object_info = object_info or {}
+    ours = [name for name in CAPTIONER_PREFERENCE if name in object_info]
+    if requested in ("off", "none", "disabled"):
+        return {"mode": "none", "class": "", "label": "", "reason": "captioner disabled"}
+    if requested and requested not in ("auto", "", None):
+        if requested in object_info:
+            if requested in CAPTIONER_PREFERENCE:
+                return {"mode": "native", "class": requested, "label": requested,
+                        "reason": "selected captioner"}
+            if CAPTIONER_TAP in object_info:
+                return {"mode": "tap", "class": requested, "label": requested,
+                        "reason": "selected captioner + MusicCaptionTap"}
+            return {"mode": "none", "class": requested, "label": requested,
+                    "reason": f"'{requested}' needs {CAPTIONER_TAP} from comfyui_music_caption"}
+        return {"mode": "none", "class": requested, "label": requested,
+                "reason": f"captioner node '{requested}' is not installed"}
+
+    if ours:
+        return {"mode": "native", "class": ours[0], "label": ours[0],
+                "reason": "comfyui_music_caption found"}
+    third_party = captioner_candidates(object_info)
+    if third_party:
+        if CAPTIONER_TAP in object_info:
+            best = third_party[0]
+            return {"mode": "tap", "class": best["class"], "label": best["label"],
+                    "reason": "third-party captioner + MusicCaptionTap"}
+        return {"mode": "tap", "class": third_party[0]["class"], "label": third_party[0]["label"],
+                "reason": f"'{third_party[0]['class']}' found but {CAPTIONER_TAP} "
+                          "(comfyui_music_caption) is missing"}
+    return {"mode": "none", "class": "", "label": "",
+            "reason": "no captioner node - install comfyui_music_caption/ from this repo"}
+
+
+def _fill_inputs(entry, overrides=None, links=None, skip=()):
+    """Build an API-format inputs dict from object_info defaults + our overrides."""
+    overrides = overrides or {}
+    links = links or {}
+    required = _required_names(entry)
+    inputs = {}
+    for name, spec in _node_specs(entry).items():
+        if name in skip:
+            continue
+        if name in links:
+            inputs[name] = links[name]
+            continue
+        if name in overrides:
+            inputs[name] = overrides[name]
+            continue
+        default = _spec_default(spec)
+        if default is _MISSING:
+            if name in required:
+                raise ComfyError(
+                    f"captioner input '{name}' ({_spec_type(spec) or 'link'}) cannot be filled "
+                    "by the app - pick another captioner node"
+                )
+            continue
+        inputs[name] = default
+    return inputs
+
+
+def _captioner_inputs(entry, uploaded_node, moss_url="", moss_mode="auto", max_seconds=90.0):
+    """Defaults for a captioner node, with the audio wired to a LoadAudio node."""
+    specs = _node_specs(entry)
+    audio_name = next((name for name, spec in specs.items() if _spec_type(spec) == "AUDIO"), None)
+    if audio_name is None:
+        raise ComfyError("captioner node has no AUDIO input")
+    overrides = {}
+    for name in specs:
+        lowered = name.lower()
+        if lowered in ("server_url", "base_url", "api_url", "endpoint", "server") and moss_url:
+            overrides[name] = moss_url
+        elif lowered in ("mode", "task", "question") and moss_mode and _spec_type(specs[name]) == "COMBO":
+            choices = specs[name][0] if isinstance(specs[name][0], list) else []
+            if moss_mode in choices:
+                overrides[name] = moss_mode
+        elif lowered in ("max_seconds", "audio_seconds", "duration", "max_duration"):
+            if _spec_type(specs[name]) in ("FLOAT", "INT") and max_seconds:
+                overrides[name] = float(max_seconds) if _spec_type(specs[name]) == "FLOAT" else int(max_seconds)
+    return _fill_inputs(entry, overrides=overrides, links={audio_name: [uploaded_node, 0]})
+
+
+def build_caption_prompt(object_info, plan, uploaded_name, moss_url=MOSS_DEFAULT_URL,
+                         moss_mode="auto", max_seconds=90.0, prefer_numeric="dsp"):
+    """Build the small API workflow that captions `uploaded_name`.
+
+    Returns (prompt, meta) where meta tells `caption_result_from_history` where
+    to read the answer.
+    """
+    object_info = object_info or {}
+    prompt = {"1": {"class_type": "LoadAudio", "inputs": {"audio": uploaded_name}}}
+    meta = {"kind": plan.get("mode"), "captioner": plan.get("class"), "read_node": ""}
+
+    if plan.get("mode") == "native":
+        requested = plan.get("class") or "auto"
+        use_analyze = "MusicCaptionAnalyze" in object_info and requested in (
+            "auto", "MusicCaptionAnalyze", "MusicCaptionMerge"
+        )
+        use_moss = "MusicCaptionMOSS" in object_info and requested in (
+            "auto", "MusicCaptionMOSS", "MusicCaptionMerge"
+        )
+        if not (use_analyze or use_moss):
+            # a requested node is missing: fall back to whatever is installed
+            use_analyze = "MusicCaptionAnalyze" in object_info
+            use_moss = "MusicCaptionMOSS" in object_info
+        if use_analyze:
+            prompt["2"] = {
+                "class_type": "MusicCaptionAnalyze",
+                "inputs": _fill_inputs(
+                    object_info["MusicCaptionAnalyze"],
+                    overrides={"max_seconds": float(max_seconds)},
+                    links={"audio": ["1", 0]},
+                ),
+            }
+        if use_moss:
+            prompt["3"] = {
+                "class_type": "MusicCaptionMOSS",
+                "inputs": _fill_inputs(
+                    object_info["MusicCaptionMOSS"],
+                    overrides={"server_url": moss_url, "mode": moss_mode,
+                               "max_seconds": float(max_seconds)},
+                    links={"audio": ["1", 0]},
+                ),
+            }
+        if "2" in prompt and "3" in prompt and "MusicCaptionMerge" in object_info:
+            prompt["4"] = {
+                "class_type": "MusicCaptionMerge",
+                "inputs": _fill_inputs(
+                    object_info["MusicCaptionMerge"],
+                    overrides={"prefer_numeric": prefer_numeric},
+                    links={"analysis_json": ["2", 8], "moss_json": ["3", 7]},
+                ),
+            }
+            meta["read_node"] = "4"
+        elif "2" in prompt:
+            meta["read_node"] = "2"
+        else:
+            meta["read_node"] = "3"
+        if not meta["read_node"]:
+            raise ComfyError("comfyui_music_caption is installed but no usable node was found")
+        return prompt, meta
+
+    if plan.get("mode") == "tap":
+        captioner = plan.get("class")
+        if captioner not in object_info:
+            raise ComfyError(f"captioner node '{captioner}' is not installed")
+        if CAPTIONER_TAP not in object_info:
+            raise ComfyError(
+                f"{CAPTIONER_TAP} is missing - install comfyui_music_caption/ from this repo"
+            )
+        prompt["2"] = {
+            "class_type": captioner,
+            "inputs": _captioner_inputs(
+                object_info[captioner], "1", moss_url, moss_mode, max_seconds
+            ),
+        }
+        links = {}
+        names = []
+        for position, (index, name) in enumerate(_string_output_indices(object_info[captioner])[:12]):
+            links[f"text_{position + 1}"] = ["2", index]
+            names.append(name)
+        if not names:
+            raise ComfyError(f"captioner '{captioner}' returns no STRING outputs")
+        prompt["3"] = {
+            "class_type": CAPTIONER_TAP,
+            "inputs": _fill_inputs(
+                object_info[CAPTIONER_TAP], overrides={"label": captioner},
+                links=links, skip=("text_1", "text_2", "text_3", "text_4", "text_5", "text_6",
+                                   "text_7", "text_8", "text_9", "text_10", "text_11", "text_12"),
+            ),
+        }
+        prompt["3"]["inputs"].update(links)
+        meta["read_node"] = "3"
+        meta["output_names"] = names
+        return prompt, meta
+
+    raise ComfyError(plan.get("reason") or "no captioner available")
+
+
+def describe_captioners(object_info, plan=None):
+    """Human-readable lines about the captioners the server offers."""
+    ours = [name for name in CAPTIONER_PREFERENCE if name in (object_info or {})]
+    third_party = captioner_candidates(object_info)
+    lines = []
+    if ours:
+        lines.append("captioner: comfyui_music_caption installed (" + ", ".join(ours) + ")")
+    else:
+        lines.append("captioner: comfyui_music_caption is NOT installed "
+                     "(copy comfyui_music_caption/ into ComfyUI/custom_nodes/ and restart)")
+    if third_party:
+        lines.append("third-party captioners: " + ", ".join(
+            f"{item['class']}" for item in third_party[:6]))
+    if plan:
+        if plan.get("mode") == "none":
+            lines.append("  -> captioning off: " + plan.get("reason", ""))
+        else:
+            lines.append(f"  -> will caption with {plan.get('class')} ({plan.get('mode')})")
+    if ours and "MusicCaptionMOSS" in ours:
+        lines.append(f"  MOSS-Music server (optional, better captions): {MOSS_DEFAULT_URL} "
+                     "- `sglang serve --model-path MOSS-Music-8B-Instruct --trust-remote-code`")
+    return lines
+
+
+def _history_texts(history_entry, node_id):
+    outputs = (history_entry or {}).get("outputs") or {}
+    entry = outputs.get(str(node_id)) or {}
+    blocks = entry.get("text") or []
+    return [block for block in blocks if isinstance(block, str)]
+
+
+def interpret_caption_payload(payload):
+    """Normalise whatever a captioner returned into the app's caption dict."""
+    result = {
+        "caption": "", "tags": "", "bpm": 0, "keyscale": "", "lyrics": "",
+        "vocal_type": "", "vocal_presence": "", "instrumental": None,
+        "structure": "", "notes": [], "raw": payload,
+    }
+    if isinstance(payload, str):
+        payload = {"caption": payload}
+    if not isinstance(payload, dict):
+        return result
+
+    def pick(*names):
+        for name in names:
+            for key, value in payload.items():
+                if str(key).lower() == name and value not in (None, "", [], {}):
+                    return value
+        return None
+
+    measured = payload.get("measured") if isinstance(payload.get("measured"), dict) else {}
+    model = payload.get("model") if isinstance(payload.get("model"), dict) else {}
+
+    caption = pick("caption", "description") or ""
+    tags = pick("tags") or ""
+    if not caption and model:
+        caption = model.get("caption") or ""
+    if not caption and measured:
+        caption = measured.get("caption") or ""
+
+    bpm = normalize_bpm(payload.get("bpm"))
+    if not bpm and model:
+        bpm = normalize_bpm(model.get("bpm"))
+    if not bpm and measured:
+        bpm = normalize_bpm(measured.get("bpm"))
+    if not bpm:
+        for key in ("tempo", "tempo_bpm", "bpm_value"):
+            bpm = normalize_bpm(pick(key))
+            if bpm:
+                break
+
+    keyscale = normalize_keyscale(pick("keyscale", "key", "key_scale", "scale", "keyscale_key"))
+    if not keyscale and model:
+        keyscale = normalize_keyscale(model.get("keyscale") or model.get("key"))
+    if not keyscale and measured:
+        keyscale = normalize_keyscale(measured.get("key"))
+
+    lyrics = pick("lyrics", "lyric") or ""
+    vocal_type = pick("vocal_type", "voice", "vocal_details") or ""
+    if not vocal_type and model:
+        vocal_type = model.get("vocal_type") or ""
+    presence = pick("vocal_presence", "vocal") or ""
+    if isinstance(presence, dict):
+        vocal_type = vocal_type or str(presence.get("type") or "")
+        presence = presence.get("presence") or ""
+    if not vocal_type and measured.get("vocal"):
+        vocal_type = str((measured.get("vocal") or {}).get("type") or "")
+    if not presence and measured.get("vocal"):
+        presence = str((measured.get("vocal") or {}).get("presence") or "")
+
+    instrumental = payload.get("instrumental")
+    if instrumental is None and model.get("instrumental") is not None:
+        instrumental = bool(model["instrumental"])
+    if instrumental is None and str(presence).lower() in ("instrumental", "vocals", "uncertain"):
+        instrumental = str(presence).lower() == "instrumental"
+
+    result.update(
+        caption=str(caption).strip(),
+        tags=str(tags).strip(),
+        bpm=bpm,
+        keyscale=keyscale,
+        lyrics=str(lyrics).strip(),
+        vocal_type=str(vocal_type).strip(),
+        vocal_presence=str(presence).strip(),
+        instrumental=instrumental,
+        structure=str(pick("structure") or (model.get("structure") or "")).strip(),
+    )
+    for key in ("analysis_json", "moss_json", "summary_json"):
+        if isinstance(payload.get(key), str):
+            try:
+                payload[key] = json.loads(payload[key])
+            except ValueError:
+                pass
+    if result["bpm"]:
+        result["notes"].append(f"{result['bpm']} bpm")
+    if result["keyscale"]:
+        result["notes"].append(result["keyscale"])
+    if result["vocal_type"]:
+        result["notes"].append(f"vocals: {result['vocal_type']}")
+    elif result["instrumental"]:
+        result["notes"].append("instrumental")
+    return result
+
+
+def caption_result_from_history(history_entry, meta):
+    """Read the captioner answer out of a /history entry."""
+    node_id = str(meta.get("read_node") or "")
+    blocks = _history_texts(history_entry, node_id) if node_id else []
+    if not blocks:
+        for candidate in ((history_entry or {}).get("outputs") or {}):
+            blocks = _history_texts(history_entry, candidate)
+            if blocks:
+                node_id = candidate
+                break
+    if not blocks:
+        raise ComfyError(
+            "the captioner ran but returned no text - it has to write its result into the "
+            f"history 'text' output (node {node_id or '?'})"
+        )
+    payload = blocks[-1]
+    try:
+        loaded = json.loads(payload)
+    except ValueError:
+        loaded = payload
+    if isinstance(loaded, list):
+        names = meta.get("output_names") or []
+        fields = {}
+        for index, value in enumerate(loaded):
+            name = names[index] if index < len(names) else f"output_{index}"
+            fields[str(name)] = value
+        return interpret_caption_payload(fields)
+    return interpret_caption_payload(loaded)
+
+
+def merge_caption_into_settings(settings, caption_result, fill_lyrics=False):
+    """Apply a caption result to the settings; returns the list of changes (for the log)."""
+    changes = []
+    bpm = caption_result.get("bpm")
+    if bpm and str(bpm) != str(settings.bpm):
+        changes.append(f"bpm {settings.bpm} -> {bpm}")
+        settings.bpm = int(bpm)
+    keyscale = caption_result.get("keyscale")
+    if keyscale and keyscale != settings.keyscale:
+        changes.append(f"key {settings.keyscale} -> {keyscale}")
+        settings.keyscale = keyscale
+    if fill_lyrics and not settings.lyrics.strip() and not caption_result.get("instrumental"):
+        lyrics = caption_result.get("lyrics") or ""
+        if lyrics and not re.match(r"^\s*\[instrumental\]\s*$", lyrics, re.I):
+            settings.lyrics = lyrics
+            changes.append(f"lyrics filled from the captioner ({len(lyrics)} chars)")
+    return changes
+
+
+def caption_tags_from_result(caption_result):
+    """The part of a caption result that belongs in the tag prompt.
+
+    `tags` (from our merge node) is the finished string, so it is used as the base
+    and only what is missing is added - no "96 bpm" twice.
+    """
+    merged = caption_result.get("tags") or ""
+    pieces = [caption_result.get("caption") or ""]
+    if caption_result.get("vocal_type") and caption_result.get("vocal_presence") != "instrumental":
+        pieces.append(str(caption_result["vocal_type"]))
+    if caption_result.get("structure"):
+        pieces.append(str(caption_result["structure"]))
+    if caption_result.get("bpm"):
+        pieces.append(f"{int(caption_result['bpm'])} bpm")
+    if caption_result.get("keyscale"):
+        pieces.append(caption_result["keyscale"])
+    for piece in pieces:
+        if not piece:
+            continue
+        if piece.lower() in merged.lower():
+            continue
+        merged = merge_prompt_text(merged, piece, append=True)
+    return merged
+
+
+def effective_tags(settings, prompt_text="", caption_tags=""):
+    """description text widget + prompt file + captioner, in that order."""
+    tags = merge_prompt_text(settings.tags, prompt_text, append=settings.prompt_append)
+    if caption_tags:
+        tags = merge_prompt_text(tags, caption_tags, append=True)
+    return tags
+
+
 def make_output_name(audio_file, add_seconds, server_name):
     stem = os.path.splitext(os.path.basename(audio_file))[0] if audio_file else "audio"
     ext = os.path.splitext(server_name)[1] or ".flac"
@@ -553,6 +1199,44 @@ def check_setup(client, node_classes=None, assets=None):
     return lines, ok
 
 
+def _cli_caption(settings):
+    """--caption: run the captioner on the source file and print the result."""
+    if not settings.audio_file or not os.path.isfile(settings.audio_file):
+        print("--caption needs --audio with an existing file", file=sys.stderr)
+        return 2
+    client = ComfyClient(settings.comfy_url)
+    try:
+        info = client.object_info()
+    except ComfyError as exc:
+        print(f"cannot read /object_info: {exc}", file=sys.stderr)
+        return 1
+    plan = captioner_plan(info, settings.captioner)
+    if plan["mode"] == "none" or settings.captioner == "off":
+        print("no captioner: " + (plan.get("reason") or "disabled"), file=sys.stderr)
+        for line in describe_captioners(info, plan):
+            print(line, file=sys.stderr)
+        return 1
+    print(f"captioner: {plan['label']} ({plan['mode']})")
+    uploaded = client.upload_audio(settings.audio_file)
+    prompt, meta = build_caption_prompt(
+        info, plan, uploaded, moss_url=settings.captioner_url,
+        prefer_numeric=settings.caption_prefer_numeric,
+    )
+    prompt_id = client.queue_prompt(prompt)
+    entry = client.wait(prompt_id)
+    result = caption_result_from_history(entry, meta)
+    changes = merge_caption_into_settings(settings, result, fill_lyrics=settings.caption_fill_lyrics)
+    print(f"bpm:      {result.get('bpm') or '-'}")
+    print(f"keyscale: {result.get('keyscale') or '-'}")
+    print(f"vocals:   {result.get('vocal_type') or result.get('vocal_presence') or '-'}")
+    print(f"tags:     {caption_tags_from_result(result) or '-'}")
+    if result.get("structure"):
+        print(f"structure: {result['structure']}")
+    for change in changes:
+        print("  " + change)
+    return 0
+
+
 def main_cli(argv=None):
     parser = argparse.ArgumentParser(description="Continue a music file with ComfyUI (ACE-Step 1.5).")
     parser.add_argument("--url", default=None, help="ComfyUI base url")
@@ -562,6 +1246,17 @@ def main_cli(argv=None):
     parser.add_argument("--check", action="store_true", help="only test the ComfyUI setup, no GUI")
     parser.add_argument("--dry-run", action="store_true", help="write the patched workflow, do not run it")
     parser.add_argument("--out", default=None, help="output path for --dry-run")
+    parser.add_argument("--prompt-file", default=None,
+                        help="prompt/description file (default: auto-detected next to the audio)")
+    parser.add_argument("--append-prompt", dest="append_prompt", action="store_true", default=None,
+                        help="append the prompt file to the description (default)")
+    parser.add_argument("--replace-prompt", dest="append_prompt", action="store_false",
+                        help="let the prompt file replace the description")
+    parser.add_argument("--captioner", default=None,
+                        help="captioner node class, 'auto' (default) or 'off'")
+    parser.add_argument("--captioner-url", default=None, help="MOSS-Music SGLang url")
+    parser.add_argument("--caption", action="store_true",
+                        help="caption the audio and print bpm/key/vocal tags, no generation")
     args = parser.parse_args(argv)
 
     settings = load_settings()
@@ -573,6 +1268,19 @@ def main_cli(argv=None):
         settings.add_seconds = args.add
     if args.workflow:
         settings.workflow = args.workflow
+    if args.prompt_file:
+        settings.prompt_file = args.prompt_file
+    elif settings.audio_file and settings.auto_prompt_file:
+        settings.prompt_file = find_prompt_file(settings.audio_file)
+    if args.append_prompt is not None:
+        settings.prompt_append = args.append_prompt
+    if args.captioner:
+        settings.captioner = args.captioner
+    if args.captioner_url:
+        settings.captioner_url = args.captioner_url
+
+    if args.caption:
+        return _cli_caption(settings)
 
     if args.check:
         node_classes = assets = preset = None
@@ -584,11 +1292,17 @@ def main_cli(argv=None):
             preset = model_preset(workflow)
         except (OSError, ValueError) as exc:
             print(f"(could not read workflow: {exc}; checking the default node set)")
-        lines, ok = check_setup(ComfyClient(settings.comfy_url), node_classes, assets)
+        client = ComfyClient(settings.comfy_url)
+        lines, ok = check_setup(client, node_classes, assets)
         if preset:
             lines.append(
                 f"model preset: {preset['label']} -> {preset['steps']} steps, cfg {preset['cfg']}"
             )
+        try:
+            info = client.object_info()
+            lines += describe_captioners(info, captioner_plan(info, settings.captioner))
+        except ComfyError as exc:
+            lines.append(f"(captioners not checked: {exc})")
         print("\n".join(lines))
         return 0 if ok else 1
 
@@ -598,6 +1312,11 @@ def main_cli(argv=None):
             return 2
         with open(settings.workflow, "r", encoding="utf-8") as fh:
             workflow = json.load(fh)
+        prompt_text = read_prompt_file(settings.prompt_file) if settings.prompt_file else ""
+        if prompt_text:
+            print(f"prompt file: {settings.prompt_file} "
+                  f"({'append' if settings.prompt_append else 'replace'})")
+        settings.tags = effective_tags(settings, prompt_text)
         patched = patch_workflow(workflow, settings, uploaded_name=os.path.basename(settings.audio_file or "input.wav"))
         out = args.out or os.path.join(HERE, "patched_workflow.json")
         with open(out, "w", encoding="utf-8") as fh:
@@ -623,7 +1342,7 @@ class App:
         self.last_output = None
 
         root.title(APP_NAME + " - ComfyUI / ACE-Step 1.5")
-        root.minsize(760, 720)
+        root.minsize(820, 860)
         self._build_ui()
         self._apply_settings()
         if self.settings.window_geometry:
@@ -734,9 +1453,58 @@ class App:
             box, text="Sampler defaults for this workflow", command=self.on_apply_preset
         ).grid(row=4, column=0, columnspan=3, sticky="w", **pad)
 
+        # prompt source: description text + prompt file + captioner
+        box = ttk.LabelFrame(outer, text="Prompt source (description, prompt file, captioner)", padding=6)
+        box.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        box.columnconfigure(1, weight=1)
+
+        ttk.Label(box, text="Prompt file").grid(row=0, column=0, sticky="w", **pad)
+        self.promptfile_var = tk.StringVar()
+        ttk.Entry(box, textvariable=self.promptfile_var).grid(row=0, column=1, sticky="ew", **pad)
+        ttk.Button(box, text="Browse...", command=self.on_pick_prompt_file).grid(row=0, column=2, **pad)
+        ttk.Button(box, text="Find next to audio", command=self.on_find_prompt_file).grid(
+            row=0, column=3, **pad
+        )
+        self.append_prompt_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            box, text="append the prompt file to the description (unticked: replace it)",
+            variable=self.append_prompt_var,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", **pad)
+        self.auto_prompt_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            box, text="look for one automatically", variable=self.auto_prompt_var
+        ).grid(row=1, column=2, columnspan=2, sticky="w", **pad)
+
+        ttk.Label(box, text="Captioner").grid(row=2, column=0, sticky="w", **pad)
+        self.captioner_var = tk.StringVar(value="auto")
+        self.captioner_box = ttk.Combobox(
+            box, textvariable=self.captioner_var, width=28, state="readonly",
+            values=["auto", "off"],
+        )
+        self.captioner_box.grid(row=2, column=1, sticky="w", **pad)
+        ttk.Button(box, text="Analyse source", command=self.on_caption_now).grid(row=2, column=2, **pad)
+        ttk.Button(box, text="Refresh", command=self.on_refresh_captioners).grid(row=2, column=3, **pad)
+        self.auto_caption_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            box, text="run the captioner before Generate", variable=self.auto_caption_var
+        ).grid(row=3, column=0, columnspan=2, sticky="w", **pad)
+        self.fill_lyrics_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            box, text="fill empty lyrics from it", variable=self.fill_lyrics_var
+        ).grid(row=3, column=2, columnspan=2, sticky="w", **pad)
+        ttk.Label(box, text="MOSS-Music server").grid(row=4, column=0, sticky="w", **pad)
+        self.captioner_url_var = tk.StringVar(value=MOSS_DEFAULT_URL)
+        ttk.Entry(box, textvariable=self.captioner_url_var).grid(
+            row=4, column=1, columnspan=3, sticky="ew", **pad
+        )
+        self.caption_info = ttk.Label(
+            box, text="captioner not checked yet", foreground="#666", wraplength=700
+        )
+        self.caption_info.grid(row=5, column=0, columnspan=4, sticky="w", padx=6, pady=(2, 0))
+
         # description
         box = ttk.LabelFrame(outer, text="Music description (what the continuation should sound like)", padding=6)
-        box.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
+        box.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
         box.columnconfigure(0, weight=1)
         box.rowconfigure(0, weight=1)
         self.tags_text = tk.Text(box, height=4, wrap="word")
@@ -744,12 +1512,12 @@ class App:
         ttk.Label(box, text="Lyrics (leave empty for instrumental continuation)").grid(
             row=1, column=0, sticky="w", padx=6
         )
-        self.lyrics_text = tk.Text(box, height=4, wrap="word")
+        self.lyrics_text = tk.Text(box, height=3, wrap="word")
         self.lyrics_text.grid(row=2, column=0, sticky="nsew", **pad)
 
         # output
         box = ttk.LabelFrame(outer, text="Output", padding=6)
-        box.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        box.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         box.columnconfigure(1, weight=1)
         ttk.Label(box, text="ComfyUI prefix").grid(row=0, column=0, sticky="w", **pad)
         self.prefix_var = tk.StringVar(value="audio-continue/audio")
@@ -770,7 +1538,7 @@ class App:
 
         # actions
         actions = ttk.Frame(outer)
-        actions.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        actions.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         self.generate_btn = ttk.Button(actions, text="Generate", command=self.on_generate)
         self.generate_btn.pack(side="left")
         ttk.Button(actions, text="Cancel / interrupt", command=self.on_cancel).pack(side="left", padx=6)
@@ -782,8 +1550,8 @@ class App:
 
         # log
         logbox = ttk.LabelFrame(outer, text="Log", padding=4)
-        logbox.grid(row=6, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
-        outer.rowconfigure(6, weight=1)
+        logbox.grid(row=7, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
+        outer.rowconfigure(7, weight=1)
         self.log_text = tk.Text(logbox, height=10, wrap="word", state="disabled")
         self.log_text.pack(fill="both", expand=True)
         scroll = ttk.Scrollbar(self.log_text, command=self.log_text.yview)
@@ -797,6 +1565,13 @@ class App:
         self.url_var.set(s.comfy_url)
         self.workflow_var.set(s.workflow)
         self.audio_var.set(s.audio_file)
+        self.promptfile_var.set(s.prompt_file)
+        self.append_prompt_var.set(bool(s.prompt_append))
+        self.auto_prompt_var.set(bool(s.auto_prompt_file))
+        self.captioner_var.set(s.captioner or "auto")
+        self.captioner_url_var.set(s.captioner_url or MOSS_DEFAULT_URL)
+        self.auto_caption_var.set(bool(s.auto_caption))
+        self.fill_lyrics_var.set(bool(s.caption_fill_lyrics))
         self.add_var.set(str(s.add_seconds))
         self.crossfade_var.set(str(s.crossfade))
         self.mask_var.set(s.mask_mode)
@@ -823,6 +1598,13 @@ class App:
         s.comfy_url = self.url_var.get().strip() or "http://127.0.0.1:8188"
         s.workflow = self.workflow_var.get().strip() or DEFAULT_WORKFLOW
         s.audio_file = self.audio_var.get().strip()
+        s.prompt_file = self.promptfile_var.get().strip()
+        s.prompt_append = bool(self.append_prompt_var.get())
+        s.auto_prompt_file = bool(self.auto_prompt_var.get())
+        s.captioner = self.captioner_var.get().strip() or "auto"
+        s.captioner_url = self.captioner_url_var.get().strip() or MOSS_DEFAULT_URL
+        s.auto_caption = bool(self.auto_caption_var.get())
+        s.caption_fill_lyrics = bool(self.fill_lyrics_var.get())
         s.add_seconds = _as_float(self.add_var.get(), 30.0)
         s.crossfade = _as_float(self.crossfade_var.get(), 1.0)
         s.mask_mode = self.mask_var.get()
@@ -852,7 +1634,13 @@ class App:
         path = self.audio_var.get().strip()
         if path and os.path.isfile(path):
             size = os.path.getsize(path) / 1e6
-            self.audio_info.configure(text=f"{path}  ({size:.1f} MB)", foreground="#446")
+            info = f"{path}  ({size:.1f} MB)"
+            if self.auto_prompt_var.get():
+                sidecar = find_prompt_file(path)
+                if sidecar:
+                    info += f"   prompt: {os.path.basename(sidecar)}"
+                    self.promptfile_var.set(sidecar)
+            self.audio_info.configure(text=info, foreground="#446")
             if not self.outdir_var.get().strip():
                 self.outdir_var.set(os.path.dirname(os.path.abspath(path)))
         else:
@@ -910,6 +1698,113 @@ class App:
     def on_dice(self):
         self.seed_var.set(str(random.randint(0, 2**32 - 1)))
 
+    # -- prompt file / captioner -------------------------------------------------
+
+    def on_pick_prompt_file(self):
+        initial = os.path.dirname(self.promptfile_var.get() or self.audio_var.get() or "")
+        path = filedialog.askopenfilename(
+            title="Prompt / description file",
+            initialdir=initial or None,
+            filetypes=[("Prompt files", "*.txt *.md *.json"), ("All files", "*.*")],
+        )
+        if path:
+            self.promptfile_var.set(path)
+            preview = read_prompt_file(path)
+            if preview:
+                self._log(f"prompt file: {os.path.basename(path)} ({len(preview)} chars)")
+            else:
+                self._log(f"prompt file {path} has no usable text")
+
+    def on_find_prompt_file(self):
+        audio = self.audio_var.get().strip()
+        if not audio:
+            messagebox.showinfo(APP_NAME, "Pick the music file first.")
+            return
+        sidecar = find_prompt_file(audio)
+        if sidecar:
+            self.promptfile_var.set(sidecar)
+            self._log(f"found prompt file next to the audio: {sidecar}")
+        else:
+            self.promptfile_var.set("")
+            self._log("no prompt sidecar found (*.prompt.txt, *.caption.txt, *.tags.txt, *.txt, *.json)")
+
+    def on_refresh_captioners(self):
+        settings = self._collect_settings()
+        save_settings(settings)
+
+        def job():
+            client = ComfyClient(settings.comfy_url)
+            info = client.object_info()
+            plan = captioner_plan(info, settings.captioner)
+            choices = ["auto", "off"]
+            choices += [name for name in CAPTIONER_PREFERENCE if name in info]
+            choices += [item["class"] for item in captioner_candidates(info)
+                        if item["class"] not in choices]
+            self._post("captioners", (choices, plan))
+            for line in describe_captioners(info, plan):
+                self._log(line)
+
+        self._start(job, "looking for captioners")
+
+    def on_caption_now(self):
+        if self.worker and self.worker.is_alive():
+            return
+        settings = self._collect_settings()
+        save_settings(settings)
+        if not settings.audio_file or not os.path.isfile(settings.audio_file):
+            messagebox.showerror(APP_NAME, "Pick a music file first.")
+            return
+        self.cancel_flag.clear()
+
+        def job():
+            client = ComfyClient(settings.comfy_url)
+            info = client.object_info()
+            plan = captioner_plan(info, settings.captioner)
+            if plan["mode"] == "none" or settings.captioner == "off":
+                self._log("captioner: " + (plan.get("reason") or "disabled"))
+                self._status("no captioner")
+                return
+            self._log(f"captioner: {plan['label']} ({plan['mode']}, {plan['reason']})")
+            self._log("uploading " + os.path.basename(settings.audio_file))
+            uploaded = client.upload_audio(settings.audio_file)
+            result = self._caption_run(client, settings, uploaded, info, plan)
+            if result:
+                self._apply_caption_result(result, settings)
+
+        self._start(job, "captioning")
+
+    def _caption_run(self, client, settings, uploaded, object_info, plan):
+        """Queue the caption workflow, wait for it and return the parsed result."""
+        prompt, meta = build_caption_prompt(
+            object_info,
+            plan,
+            uploaded,
+            moss_url=settings.captioner_url,
+            prefer_numeric=settings.caption_prefer_numeric,
+        )
+        prompt_id = client.queue_prompt(prompt)
+        self._status("captioning")
+        entry = client.wait(prompt_id)
+        result = caption_result_from_history(entry, meta)
+        if not (result.get("bpm") or result.get("keyscale") or result.get("caption")
+                or result.get("tags")):
+            self._log("captioner returned nothing usable: " + json.dumps(result.get("raw"))[:400])
+            return None
+        return result
+
+    def _apply_caption_result(self, result, settings):
+        changes = merge_caption_into_settings(
+            settings, result, fill_lyrics=bool(settings.caption_fill_lyrics)
+        )
+        self._post("caption", (result, changes))
+        notes = ", ".join(result.get("notes") or [])
+        self._log("caption: " + (notes or "(only free text, no bpm/key/vocals)"))
+        for change in changes:
+            self._log("  " + change)
+        caption_tags = caption_tags_from_result(result)
+        if caption_tags:
+            self._log("  tags from captioner: " + caption_tags[:300])
+
     def on_check(self):
         settings = self._collect_settings()
         save_settings(settings)
@@ -924,11 +1819,17 @@ class App:
                 preset = model_preset(workflow)
             except (OSError, ValueError) as exc:
                 self._log(f"could not read workflow ({exc}); checking the default node set")
-            lines, ok = check_setup(ComfyClient(settings.comfy_url), node_classes, assets)
+            client = ComfyClient(settings.comfy_url)
+            lines, ok = check_setup(client, node_classes, assets)
             if preset:
                 lines.append(
                     f"model preset: {preset['label']} -> {preset['steps']} steps, cfg {preset['cfg']}"
                 )
+            try:
+                info = client.object_info()
+                lines += describe_captioners(info, captioner_plan(info, settings.captioner))
+            except ComfyError:
+                pass
             for line in lines:
                 self._log(line)
             self._status("ready" if ok else "setup incomplete")
@@ -1024,10 +1925,39 @@ class App:
                 self._log("saved: " + value)
                 if self.open_var.get():
                     open_in_file_manager(os.path.dirname(value))
+            elif kind == "caption":
+                self._show_caption(*value)
+            elif kind == "captioners":
+                choices, plan = value
+                self.captioner_box.configure(values=choices)
+                self._show_caption_plan(plan)
         self.root.after(120, self._drain_queue)
 
     def _post(self, kind, value):
         self.queue.append((kind, value))
+
+    def _show_caption(self, result, changes):
+        """Put a caption result on screen (bpm / key fields + one info line)."""
+        if result.get("bpm"):
+            self.bpm_var.set(str(int(result["bpm"])))
+        if result.get("keyscale"):
+            self.key_var.set(result["keyscale"])
+        bits = list(result.get("notes") or [])
+        if result.get("structure"):
+            bits.append("structure: " + result["structure"])
+        if changes:
+            bits.append("(" + "; ".join(changes) + ")")
+        text = " · ".join(bits) if bits else "captioner returned no bpm / key / vocal info"
+        self.caption_info.configure(text=text, foreground="#264" if bits else "#a00")
+
+    def _show_caption_plan(self, plan):
+        if plan.get("mode") == "none":
+            self.caption_info.configure(text=plan.get("reason", "no captioner"), foreground="#a00")
+        else:
+            self.caption_info.configure(
+                text=f"{plan['label']} available ({plan['mode']}) - press Analyse source",
+                foreground="#264",
+            )
 
     # -- the actual job ----------------------------------------------------------
 
@@ -1050,6 +1980,38 @@ class App:
         self._log(f"uploading {os.path.basename(settings.audio_file)}")
         uploaded = client.upload_audio(settings.audio_file)
         self._log(f"  -> {uploaded}")
+
+        # prompt file + captioner change the tag prompt (and sometimes bpm/key)
+        prompt_text = ""
+        if settings.prompt_file:
+            prompt_text = read_prompt_file(settings.prompt_file)
+            if prompt_text:
+                mode = "append" if settings.prompt_append else "replace"
+                self._log(
+                    f"prompt file ({mode}): {os.path.basename(settings.prompt_file)} "
+                    f"({len(prompt_text)} chars)"
+                )
+            else:
+                self._log(f"prompt file {settings.prompt_file} is empty/unreadable - ignored")
+
+        caption_tags = ""
+        if settings.auto_caption and settings.captioner != "off":
+            try:
+                info = client.object_info()
+                plan = captioner_plan(info, settings.captioner)
+                if plan["mode"] == "none":
+                    self._log("captioner: " + (plan.get("reason") or "not available"))
+                else:
+                    self._log(f"captioner: {plan['label']} ({plan['mode']})")
+                    result = self._caption_run(client, settings, uploaded, info, plan)
+                    if result:
+                        self._apply_caption_result(result, settings)
+                        caption_tags = caption_tags_from_result(result)
+            except ComfyError as exc:
+                self._log("captioner failed, continuing without it: " + str(exc))
+
+        settings.tags = effective_tags(settings, prompt_text, caption_tags)
+        self._log("prompt: " + settings.tags[:400])
 
         prompt = patch_workflow(workflow, settings, uploaded_name=uploaded)
         self._log(

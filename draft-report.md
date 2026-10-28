@@ -48,3 +48,24 @@ python3 audio_continue_tk.py
 Pick the file, set **add seconds**, press **Generate**. In the ComfyUI workflow itself, set `add_seconds` on *Add seconds* and put the **real BPM and key of your source** into *Style + lyrics* — that's the biggest continuity win.
 
 **Honest status:** the client is tested end-to-end against a fake ComfyUI server and the node math is unit-tested (lengths, mask placement, crossfade, channel/rate handling), but nothing has run on a real GPU — so the first real run is yours. If a node name differs on your ComfyUI build, `--check` will list it and I can adjust the workflow in minutes.
+
+## 6. Captioner follow-up (the TODO from the TLDR)
+
+* **Prompt files**: sidecar detection (`song.prompt.txt`, `song.caption.txt`, `song.tags.txt`,
+  `song.txt`, `song.json`), one checkbox to append or replace, tag-level de-duplication.
+* **New pack `comfyui_music_caption/`** (no pip dependencies):
+  * `MusicCaptionAnalyze` — numpy DSP: BPM (spectral flux → autocorrelation → octave
+    correction, with `bpm_candidates`), key (chroma → Krumhansl-Schmuckler, `key_confidence`,
+    Camelot), vocal presence + register (syllabic modulation + harmonic salience), loudness,
+    brightness, section map.
+  * `MusicCaptionMOSS` — MOSS-Music 8B over an SGLang OpenAI-compatible endpoint: caption,
+    vocal description, key, BPM, structure, lyrics. Degrades gracefully when the server is
+    absent.
+  * `MusicCaptionMerge` — one `tags` / `lyrics` / `bpm` / `keyscale` bundle for the text encoder.
+  * `MusicCaptionTap` — makes captioners from *other* packs readable by the app.
+* **App**: captioner auto-discovery through `/object_info` (ours first, then any node with an
+  AUDIO input, STRING outputs and "caption/analyze/scribe/music info" in its name), an
+  `Analyse source` button, a *run before Generate* checkbox, results written back into the
+  BPM/key fields + description, and a captioner failure never blocks a render.
+* **Tests**: 16 GUI tests against a fake tkinter (including the full generate job with the
+  fake ComfyUI server), 29 client/captioner tests, 25 node/DSP tests.

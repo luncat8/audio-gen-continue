@@ -209,7 +209,16 @@ Practical settings that matter more than the sampler:
 
 ---
 
-## 7. Sources
+## 7. Captioning the source (key / BPM / vocal type)
+
+Everything the text encoder wants — tags, lyrics, BPM, key — is now produced automatically:
+a numpy DSP analysis (tempo, Krumhansl key, vocal presence + register, sections) plus an
+optional MOSS-Music 8B pass (caption, vocal description, structure, lyrics) merged into one
+prompt, and a prompt file next to the track can be appended. The full comparison of
+ComfyUI captioners, why MOSS-Music won, and the honest limits of each half live in
+[CAPTIONER.md](CAPTIONER.md); the code is `comfyui_music_caption/` + `audio_continue_tk.py`.
+
+## 8. Sources
 
 ComfyUI code (checked directly):
 

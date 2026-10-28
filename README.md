@@ -1,6 +1,11 @@
 # audio-gen-continue
 
-TLDR: it works somehow but quality and continuation is not acceptable, need to try next year with better models. TODO: good captioner, best if capable to detect key, BMP, and vocal type.
+TLDR: it works somehow but quality and continuation is not acceptable, need to try next year with better models.
+
+The captioner TODO is done: a prompt file next to the track can be appended with one
+checkbox, and the source is analysed for **BPM, key and vocal type** — measured with DSP
+(always) and described by **MOSS-Music 8B** (if you run its server). See
+[CAPTIONER.md](CAPTIONER.md) for the investigation behind that choice.
 
 Continue an existing music file with ComfyUI. Pick a track, say how many seconds to add,
 press **Generate** — you get `yourtrack_continue+30s_20261027-183000.flac` with your
@@ -18,6 +23,9 @@ original audio preserved and a seamless generated tail.
                                                    │
                                             SaveAudio → output/audio-continue/
 ```
+
+The prompt side (tags, lyrics, BPM, key) is fed from three places: the description box, an
+optional prompt file next to the track, and the captioner that measures the source — see §4.
 
 Model: **ACE-Step 1.5 XL SFT** (split files: 4B DiT + Qwen text encoders + VAE), 48 kHz,
 50 steps / CFG 7.0. See [RESEARCH.md](RESEARCH.md) for why this model, why the XL variant,
@@ -42,22 +50,29 @@ lower VRAM footprint. Load it with **Workflow...** in the app.
   `TextEncodeAceStepAudio1.5` exists in the node search).
 * Python 3.9+ with **tkinter** for the GUI (Debian/Ubuntu: `sudo apt install python3-tk`).
   The app itself has **no pip dependencies** — stdlib only.
+* Optional captioner: nothing extra (numpy DSP). For MOSS-Music captioning: its SGLang
+  server plus ~17 GB of weights (see [CAPTIONER.md](CAPTIONER.md)).
 * GPU: **≥12 GB VRAM** for XL with ComfyUI offloading, **≥20 GB** for a comfortable run
   (XL DiT ≈10 GB bf16 + 4B text encoder ≈8 GB). ~8 GB is enough for the archived 2B turbo
   AIO workflow, especially with the LM disabled (untick `generate_audio_codes`).
   No GPU is used by the Tk app, it only talks HTTP to ComfyUI.
 
-## 2. Install the custom nodes (2 nodes, no dependencies)
+## 2. Install the custom nodes (two packs, no dependencies)
 
 ```bash
 cp -r comfyui_audio_continue  /path/to/ComfyUI/custom_nodes/
-# or:  ln -s "$PWD/comfyui_audio_continue" /path/to/ComfyUI/custom_nodes/comfyui_audio_continue
+cp -r comfyui_music_caption   /path/to/ComfyUI/custom_nodes/
+# or symlink them, the app does not care
 ```
 
 Restart ComfyUI, then in the node search you should find
-`Audio Continue (extend latent)` and `Audio Continue (stitch result)`.
 
-They only use `torch` + `comfy.audio.resample`, i.e. what ComfyUI already ships.
+* `audio/continue` — `Audio Continue (extend latent)`, `Audio Continue (stitch result)`
+* `audio/caption` — `Music Caption (measure: bpm / key / vocals)`, `Music Caption (MOSS-Music)`,
+  `Music Caption (build prompt)`, `Music Caption (collect text)`
+
+They only use `torch` + `comfy.audio.resample` + `numpy`, i.e. what ComfyUI already ships.
+The captioner pack is optional but recommended (§4).
 
 ## 3. Download the model (XL SFT, 4 files ≈ 20 GB)
 
@@ -100,7 +115,43 @@ Archived 2B setup (unchanged): the single 10 GB file
 `ComfyUI/models/checkpoints/ace_step_1.5_turbo_aio.safetensors` from
 <https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/tree/main/checkpoints>.
 
-## 4. Run the GUI
+---
+
+## 4. Prompt file + captioner (BPM / key / vocal type)
+
+Two things make the prompt better without typing:
+
+**Prompt file.** If a sidecar prompt sits next to the track, the app finds it automatically:
+`song.prompt.txt`, `song.caption.txt`, `song.description.txt`, `song.tags.txt`, `song.txt`,
+`song.json` (`prompt` / `caption` / `tags` / `description` key). The checkbox decides
+whether it is *appended* to the description box or *replaces* it — tags are merged
+de-duplicated (`instrumental, same tempo` + `same tempo, vinyl crackle` →
+`instrumental, same tempo, vinyl crackle`).
+
+**Captioner.** Install the second node pack from this repo:
+
+```bash
+cp -r comfyui_music_caption /path/to/ComfyUI/custom_nodes/     # restart ComfyUI
+```
+
+Then `Analyse source` (or the *run the captioner before Generate* checkbox) measures the
+track and fills **BPM**, **Key** and the description, printing the vocal type in the log:
+
+| What | How | Needs |
+| --- | --- | --- |
+| BPM, key + confidence, vocal presence + register, loudness, sections | `MusicCaptionAnalyze` — numpy DSP, measured not guessed | nothing |
+| genre/mood/instrumentation caption, vocal description, structure, lyrics, chords | `MusicCaptionMOSS` — MOSS-Music 8B (Apache-2.0) | `sglang serve --model-path MOSS-Music-8B-Instruct --trust-remote-code` on :30000 |
+| merged tags / lyrics / bpm / keyscale | `MusicCaptionMerge` | the two above |
+
+Without a MOSS server everything still works on the DSP numbers alone; the captioner never
+blocks a render (a failure is logged and generation continues). Third-party captioners
+(SongScribe's *Song Analyzer*, ACE-Step's *Get Music Infos*, …) are detected through their
+`/object_info` and used through `MusicCaptionTap` — see [CAPTIONER.md](CAPTIONER.md) for the
+comparison, the MOSS-Music install, the node reference and the honest limits (a plucked
+synth arpeggio and a syllabic vocal line look alike to a heuristic; the 8B model knows the
+difference).
+
+## 5. Run the GUI
 
 ```bash
 python3 audio_continue_tk.py
@@ -117,6 +168,9 @@ python3 audio_continue_tk.py
 | **Steps / CFG** | 50 / 7.0 for XL SFT (what the shipped workflow uses), 8 / 1.0 for XL turbo or the archived 2B AIO. **Sampler defaults for this workflow** re-reads these from the loaded workflow so you cannot accidentally run an SFT model at turbo settings. |
 | **Seed** | `new seed each run` keeps rolling; untick to reproduce a take. |
 | **LM audio-code planning** | `generate_audio_codes`. Faster and more "prefix-driven" when off; more detailed arrangement when on. |
+| **Prompt file** | Optional text/JSON file appended to (or replacing) the description. **Find next to audio** looks for the sidecars listed above; *look for one automatically* does it whenever you pick a track. |
+| **Captioner / Analyse source** | Detects a captioner (ours first, then third-party packs), runs it on the source and fills BPM, key and the description. *run the captioner before Generate* does it inside the job; *fill empty lyrics from it* also copies transcribed lyrics (off by default — the tail would sing the source words). |
+| **MOSS-Music server** | Where the MOSS-Music SGLang server listens (default `http://127.0.0.1:30000`), passed to the `MusicCaptionMOSS` node. |
 | **Music description** | Tags describing the *existing* arrangement ("same instruments, same mix, no intro"). Not a new song idea. |
 | **Lyrics** | Leave **empty** for instrumental continuation, otherwise the model may start singing. |
 | **ComfyUI prefix** | Destination inside `ComfyUI/output`. Default `audio-continue/audio` → `output/audio-continue/audio_00001_.flac`. |
@@ -126,7 +180,7 @@ Everything (last file, last folder, server, all parameters, window size) is save
 `~/.audio_continue.json` and restored on startup. Override the path with
 `AUDIO_CONTINUE_CONFIG=/some/file.json`.
 
-## 5. Test the graph in ComfyUI itself
+## 6. Test the graph in ComfyUI itself
 
 `workflows/ace15xl_audio_continue_ui.json` is a normal UI workflow — drag it onto the canvas:
 
@@ -155,7 +209,7 @@ contains the XL and the archived AIO graph):
 python3 tools/build_workflows.py
 ```
 
-## 6. Command line
+## 7. Command line
 
 ```bash
 # verify a ComfyUI install without opening a window
@@ -163,24 +217,35 @@ python3 audio_continue_tk.py --check --url http://127.0.0.1:8188
 
 # write the patched API workflow and inspect it (no generation)
 python3 audio_continue_tk.py --dry-run --audio song.mp3 --add 30 --out patched.json
+
+# what does the captioner say about this track?
+python3 audio_continue_tk.py --caption --url http://127.0.0.1:8188 --audio song.flac
+
+# prompt file handling without the GUI (append is the default, --replace-prompt to replace)
+python3 audio_continue_tk.py --dry-run --audio song.flac --prompt-file song.prompt.txt
+python3 audio_continue_tk.py --dry-run --audio song.flac --captioner off --replace-prompt
 ```
 
-`--check` reports the ComfyUI version, GPU, missing nodes and available checkpoints.
+`--check` reports the ComfyUI version, GPU, missing nodes, available checkpoints and which
+captioner it would use. `--caption` prints `bpm`, `keyscale`, vocal type and the resulting
+tags, and applies the same normalisation the GUI does.
 
-## 7. Files
+## 8. Files
 
 ```
 audio_continue_tk.py                            the Tk app (GUI + --check / --dry-run)
-comfyui_audio_continue/                         ComfyUI custom node pack (2 nodes)
+comfyui_audio_continue/                         ComfyUI custom node pack (extend + stitch)
+comfyui_music_caption/                          ComfyUI captioner pack (DSP + MOSS-Music + merge)
 workflows/ace15xl_audio_continue_ui.json        default: XL SFT, drag & drop into ComfyUI
 workflows/ace15xl_audio_continue_api.json       default: what the app posts to /prompt
 workflows/archive/ace15_audio_continue_turbo_aio_{ui,api}.json   archived 2B turbo AIO pair
 tools/build_workflows.py                        generates all four workflow files
-tests/                                          headless tests (fake ComfyUI server + numpy torch stub)
+tests/                                          headless tests (fake ComfyUI + fake tkinter + torch stub)
 RESEARCH.md                                     model/workflow investigation, sources, caveats
+CAPTIONER.md                                    captioner investigation: key / BPM / vocal type
 ```
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Fix |
 | --- | --- |
@@ -194,9 +259,13 @@ RESEARCH.md                                     model/workflow investigation, so
 | Out of VRAM | XL needs ≥12 GB (≥20 GB comfortable): swap `qwen_4b_ace15` for `qwen_1.7b_ace15`, untick LM audio-code planning, use `acestep_v1.5_xl_turbo_bf16` (8 steps), or fall back to the archived 2B AIO workflow (~8 GB). The masked prefix is attended to at every step, so a 10-minute source is much heavier than a 2-minute one. |
 | Long source track is very slow | Continue a tail instead: cut the last ~60 s in any editor, continue that file, then join it to the rest (the join is what the crossfade is for). |
 | Upload fails on a remote server | ComfyUI must be reachable over HTTP; if it sits behind a path prefix, put the full URL (including the path) into **Server**. |
+| `Analyse source` says *no captioner node* | Copy `comfyui_music_caption/` into `ComfyUI/custom_nodes/` and restart ComfyUI (`--check` lists what it found). Third-party captioners also need `MusicCaptionTap` from that pack. |
+| Captioner runs but BPM/key stay empty | Only a free-text caption came back (that is what MOSS's `caption` mode does). Use `mode = attributes` / `auto`, or set the fields by hand. |
+| Caption says "vocals: uncertain" | The DSP heuristic cannot separate a plucked synth line from singing — install/launch MOSS-Music (§4) or type the vocal type into the description. |
+| `no MOSS-Music server at ...` | Start it: `sglang serve --model-path MOSS-Music-8B-Instruct --trust-remote-code` (port 30000), and put that URL into **MOSS-Music server**. Generation works without it. |
 | Result is FLAC and large | `SaveAudioAdvanced` writes FLAC in the shipped workflows; change its `format` widget to `mp3` (or swap in `SaveAudio`) and keep `filename_prefix` — the app picks up any audio in the history output. |
 
-## 9. Other models / packs
+## 10. Other models / packs
 
 The app patches nodes by **class name**, so it also works with workflows built on
 `starsFriday/ComfyUI-ACEStep` (`ACEStep15XLExtendAudio` + `ACEStep15XLExtendLatent`,
@@ -207,11 +276,14 @@ ACE-Step 1.5 loader combination work the same way in the app. See [RESEARCH.md](
 workflows (ACE-Step 1.0 extend, MiniMax Music 3 extend, MusicGen continuation, Stable
 Audio 3 inpainting) and §6 for when to reach for them.
 
-## 10. Tests
+## 11. Tests
 
 ```bash
-python3 tests/test_client.py     # GUI client against a fake ComfyUI server (stdlib only)
-python3 tests/test_nodes.py      # node math, needs numpy (torch is stubbed)
+python3 tests/test_client.py        # GUI client against a fake ComfyUI server (stdlib only)
+python3 tests/test_nodes.py         # extend/stitch math, needs numpy (torch is stubbed)
+python3 tests/test_caption.py       # prompt files, captioner discovery, workflow building, HTTP flow
+python3 tests/test_caption_nodes.py # DSP (tempo/key/vocals), merge, tap, MOSS client helpers
+python3 tests/test_gui_smoke.py     # builds the whole window against a fake tkinter
 ```
 
 `tests/fake_comfyui.py` is also handy to click through the GUI without a GPU.

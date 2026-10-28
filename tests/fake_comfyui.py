@@ -43,16 +43,122 @@ NODES = {
     "TextEncodeAceStepAudio1.5": {"input": {"required": {}}},
     "AudioContinueExtend": {"input": {"required": {}}},
     "AudioContinueStitch": {"input": {"required": {}}},
+    # --- comfyui_music_caption (this repo) -------------------------------------------
+    "MusicCaptionAnalyze": {
+        "input": {
+            "required": {"audio": ["AUDIO"], "max_seconds": ["FLOAT", {"default": 90.0}]},
+            "optional": {
+                "sections": ["BOOLEAN", {"default": True}],
+                "extra_tags": ["STRING", {"default": "", "multiline": True}],
+            },
+        },
+        "output": ["STRING", "INT", "STRING", "FLOAT", "FLOAT", "STRING", "STRING", "FLOAT", "STRING"],
+        "output_name": ["tags", "bpm", "keyscale", "key_confidence", "bpm_confidence",
+                        "vocal_presence", "vocal_type", "duration_seconds", "analysis_json"],
+        "display_name": "Music Caption (measure: bpm / key / vocals)",
+        "description": "Measure bpm, key and vocals with numpy DSP.",
+        "category": "audio/caption",
+    },
+    "MusicCaptionMOSS": {
+        "input": {
+            "required": {
+                "audio": ["AUDIO"],
+                "server_url": ["STRING", {"default": "http://127.0.0.1:30000"}],
+                "mode": [["attributes", "caption", "vocal", "lyrics", "key_bpm", "auto"], {}],
+            },
+            "optional": {
+                "model": ["STRING", {"default": "default"}],
+                "transport": [["path", "base64"], {"default": "path"}],
+                "segment": [["tail", "head", "full"], {"default": "tail"}],
+                "max_seconds": ["FLOAT", {"default": 120.0}],
+            },
+        },
+        "output": ["STRING", "STRING", "STRING", "INT", "STRING", "BOOLEAN", "STRING", "STRING"],
+        "output_name": ["caption", "lyrics", "vocal", "bpm", "keyscale", "instrumental",
+                        "structure", "moss_json"],
+        "display_name": "Music Caption (MOSS-Music)",
+        "description": "MOSS-Music 8B captioning over an SGLang server.",
+        "category": "audio/caption",
+    },
+    "MusicCaptionMerge": {
+        "input": {
+            "required": {"prefer_numeric": [["dsp", "model"], {"default": "dsp"}]},
+            "optional": {
+                "analysis_json": ["STRING", {"default": "", "forceInput": True}],
+                "moss_json": ["STRING", {"default": "", "forceInput": True}],
+                "caption": ["STRING", {"default": "", "forceInput": True}],
+                "vocal": ["STRING", {"default": "", "forceInput": True}],
+                "lyrics": ["STRING", {"default": "", "forceInput": True}],
+                "extra_tags": ["STRING", {"default": "", "multiline": True}],
+                "keep_lyrics": ["BOOLEAN", {"default": False}],
+            },
+        },
+        "output": ["STRING", "STRING", "INT", "STRING", "BOOLEAN", "STRING", "STRING"],
+        "output_name": ["tags", "lyrics", "bpm", "keyscale", "instrumental", "vocal_type",
+                        "summary_json"],
+        "display_name": "Music Caption (build prompt)",
+        "description": "Merge DSP and MOSS findings into one prompt.",
+        "category": "audio/caption",
+    },
+    "MusicCaptionTap": {
+        "input": {
+            "required": {},
+            "optional": dict(
+                {"label": ["STRING", {"default": ""}]},
+                **{f"text_{i}": ["STRING", {"default": "", "forceInput": True}] for i in range(1, 13)}
+            ),
+        },
+        "output": ["STRING"],
+        "output_name": ["text"],
+        "display_name": "Music Caption (collect text)",
+        "description": "Collect STRING outputs of a captioner.",
+        "category": "audio/caption",
+        "output_node": True,
+    },
+    # --- a third-party captioner, to exercise the generic tap path --------------------
+    "SongScribeAnalyzer": {
+        "input": {
+            "required": {
+                "audio": ["AUDIO"],
+                "describe": [["off", "clap"], {"default": "off"}],
+                "style": [["verbatim", "balanced", "loose"], {"default": "balanced"}],
+                "transcribe_lyrics": ["BOOLEAN", {"default": False}],
+                "use_cache": ["BOOLEAN", {"default": True}],
+            },
+            "optional": {"audio_file": ["STRING", {"default": ""}]},
+        },
+        "output": ["STRING", "STRING", "FLOAT", "INT", "STRING", "SONGSCRIBE_ANALYSIS"],
+        "output_name": ["caption", "lyrics", "duration", "duration_int", "duration_str", "analysis"],
+        "display_name": "Song Analyzer (SongScribe)",
+        "description": "Extract a structured music caption, lyrics and duration from audio.",
+        "category": "audio/analysis",
+    },
 }
+
+DEFAULT_CAPTION_TEXT = json.dumps(
+    {
+        "analyzer": "merge",
+        "bpm": 96,
+        "keyscale": "A minor",
+        "vocal_type": "female",
+        "instrumental": False,
+        "tags": "dark synthwave, 96 bpm, A minor, female lead vocals",
+        "lyrics": "",
+        "measured": {"bpm": 96, "key": "A minor",
+                     "vocal": {"presence": "vocals", "type": "female"}},
+        "model": {"caption": "dark synthwave with analog bass and gated drums"},
+    }
+)
 
 
 class FakeState:
-    def __init__(self, missing_nodes=(), fail_prompt=False, prompt_delay=1):
+    def __init__(self, missing_nodes=(), fail_prompt=False, prompt_delay=1, caption_text=None):
         self.uploads = {}
         self.prompts = {}
         self.missing_nodes = set(missing_nodes)
         self.fail_prompt = fail_prompt
         self.prompt_delay = prompt_delay
+        self.caption_text = caption_text if caption_text is not None else DEFAULT_CAPTION_TEXT
         self.history_polls = {}
 
 
@@ -120,21 +226,29 @@ def make_handler(state):
                     )
                 else:
                     prompt = state.prompts[prompt_id]
-                    prefix = prompt["10"]["inputs"]["filename_prefix"]
+                    outputs = {}
+                    for node_id, node in prompt.items():
+                        class_type = node.get("class_type", "")
+                        if class_type in (
+                            "MusicCaptionAnalyze", "MusicCaptionMOSS",
+                            "MusicCaptionMerge", "MusicCaptionTap",
+                        ):
+                            outputs[node_id] = {"text": [state.caption_text]}
+                        if class_type.startswith("SaveAudio"):
+                            prefix = node.get("inputs", {}).get("filename_prefix", "audio")
+                            outputs[node_id] = {
+                                "audio": [
+                                    {
+                                        "filename": "audio_00001_.flac",
+                                        "subfolder": prefix.rsplit("/", 1)[0] if "/" in prefix else "",
+                                        "type": "output",
+                                    }
+                                ]
+                            }
                     self._send(
                         {
                             prompt_id: {
-                                "outputs": {
-                                    "10": {
-                                        "audio": [
-                                            {
-                                                "filename": "audio_00001_.flac",
-                                                "subfolder": prefix.rsplit("/", 1)[0] if "/" in prefix else "",
-                                                "type": "output",
-                                            }
-                                        ]
-                                    }
-                                },
+                                "outputs": outputs,
                                 "status": {"status_str": "success", "completed": True, "messages": []},
                             }
                         }
