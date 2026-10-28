@@ -1,5 +1,5 @@
 {
-  "id": "f372fd63-53db-4cd9-a3cf-e38ead838530",
+  "id": "7634e9d4-8c79-5a1d-bf9f-f5224cdd862f",
   "revision": 0,
   "last_node_id": 11,
   "last_link_id": 15,
@@ -12,7 +12,7 @@
         120
       ],
       "size": [
-        400,
+        420,
         100
       ],
       "flags": {},
@@ -24,25 +24,23 @@
           "name": "MODEL",
           "type": "MODEL",
           "links": [
-            1
+            1,
+            3,
+            4,
+            12
           ],
           "slot_index": 0
         },
         {
           "name": "CLIP",
           "type": "CLIP",
-          "links": [
-            4
-          ],
+          "links": null,
           "slot_index": 1
         },
         {
           "name": "VAE",
           "type": "VAE",
-          "links": [
-            3,
-            12
-          ],
+          "links": null,
           "slot_index": 2
         }
       ],
@@ -58,11 +56,11 @@
       "id": 2,
       "type": "ModelSamplingAuraFlow",
       "pos": [
-        480,
+        500,
         120
       ],
       "size": [
-        300,
+        320,
         90
       ],
       "flags": {},
@@ -99,10 +97,10 @@
       "type": "LoadAudio",
       "pos": [
         40,
-        270
+        560
       ],
       "size": [
-        400,
+        420,
         140
       ],
       "flags": {},
@@ -133,10 +131,10 @@
       "type": "AudioContinueExtend",
       "pos": [
         40,
-        450
+        740
       ],
       "size": [
-        400,
+        420,
         170
       ],
       "flags": {},
@@ -204,12 +202,12 @@
       "id": 5,
       "type": "TextEncodeAceStepAudio1.5",
       "pos": [
-        480,
-        270
+        500,
+        300
       ],
       "size": [
-        560,
-        520
+        600,
+        540
       ],
       "flags": {},
       "order": 5,
@@ -266,11 +264,11 @@
       "id": 6,
       "type": "ConditioningZeroOut",
       "pos": [
-        1080,
-        270
+        1140,
+        300
       ],
       "size": [
-        240,
+        260,
         60
       ],
       "flags": {},
@@ -302,11 +300,11 @@
       "id": 7,
       "type": "KSampler",
       "pos": [
-        1080,
-        370
+        1140,
+        400
       ],
       "size": [
-        320,
+        330,
         290
       ],
       "flags": {},
@@ -362,11 +360,11 @@
       "id": 8,
       "type": "VAEDecodeAudio",
       "pos": [
-        1440,
-        370
+        1520,
+        400
       ],
       "size": [
-        240,
+        250,
         60
       ],
       "flags": {},
@@ -403,11 +401,11 @@
       "id": 9,
       "type": "AudioContinueStitch",
       "pos": [
-        1440,
-        470
+        1520,
+        500
       ],
       "size": [
-        320,
+        330,
         110
       ],
       "flags": {},
@@ -446,14 +444,14 @@
     },
     {
       "id": 10,
-      "type": "SaveAudio",
+      "type": "SaveAudioAdvanced",
       "pos": [
-        1800,
-        470
+        1900,
+        500
       ],
       "size": [
-        400,
-        120
+        420,
+        130
       ],
       "flags": {},
       "order": 10,
@@ -475,22 +473,23 @@
       ],
       "title": "Save",
       "properties": {
-        "Node name for S&R": "SaveAudio"
+        "Node name for S&R": "SaveAudioAdvanced"
       },
       "widgets_values": [
-        "audio-continue/audio"
+        "audio-continue/audio",
+        "flac"
       ]
     },
     {
       "id": 11,
       "type": "MarkdownNote",
       "pos": [
-        40,
-        660
+        500,
+        900
       ],
       "size": [
-        700,
-        420
+        760,
+        500
       ],
       "flags": {},
       "order": 11,
@@ -502,7 +501,7 @@
         "Node name for S&R": "MarkdownNote"
       },
       "widgets_values": [
-        "## Audio Continue - ACE-Step 1.5\n\n1. Install the **audio_continue** custom nodes (this repo) and the model\n   `ace_step_1.5_turbo_aio.safetensors` in `ComfyUI/models/checkpoints/`.\n2. Load your track in **Load Audio** (upload button).\n3. Set **add_seconds** on *Audio Continue (extend latent)* = how much new music to add.\n4. Describe the music in **tags** (and paste the BPM / key of the source - it really helps).\n5. Queue. The **duration** input of the text encoder is wired to `total_seconds`.\n\nHow it works: the source is VAE-encoded, N seconds of *empty* latent frames are\nappended and masked, and the sampler only denoises the masked part. The unmasked\nprefix is pinned to the encoded original every step, so the model continues the\nactual recording instead of inventing a new song. **Stitch** then puts your exact\noriginal file back and crossfades into the generated tail.\n\nIf the join sounds rough: raise `crossfade_seconds`, or set `mask_mode` to\n`repaint_tail` with `repaint_seconds` ~2-4 s so the model re-renders the seam.\n"
+        "## Audio Continue - ACE-Step 1.5 turbo (AIO, archived)\n\nArchived workflow. Install the model\n`models/checkpoints/ace_step_1.5_turbo_aio.safetensors` and load this file with\n**Workflow...** in the app (or drag it onto the ComfyUI canvas).\n\nSampler: **8 steps, CFG 1.0**, euler + simple, `ModelSamplingAuraFlow` shift 3.0.\nThat is the turbo recipe; do not copy the XL SFT numbers (50 / 7.0) here.\n\nSame mechanics as the XL workflow: LoadAudio -> AudioContinueExtend (masked tail) ->\nKSampler -> VAEDecodeAudio -> AudioContinueStitch -> SaveAudio.\n"
       ]
     }
   ],
@@ -526,7 +525,7 @@
     [
       3,
       1,
-      2,
+      0,
       4,
       1,
       "VAE"
@@ -534,7 +533,7 @@
     [
       4,
       1,
-      1,
+      0,
       5,
       0,
       "CLIP"
@@ -598,7 +597,7 @@
     [
       12,
       1,
-      2,
+      0,
       8,
       1,
       "VAE"

@@ -10,7 +10,8 @@ Workflow
     2. set how many seconds to add
     3. press Generate
 
-The app uploads the file to ComfyUI, patches workflows/ace15_audio_continue_api.json,
+The app uploads the file to ComfyUI, patches workflows/ace15xl_audio_continue_api.json
+(ACE-Step 1.5 XL SFT; the archived 2B turbo AIO workflow in workflows/archive/ works too),
 queues it, waits for the result, downloads it next to your source file and (optionally)
 opens it. Every field, the last file and the last folder are remembered on startup.
 
@@ -47,13 +48,17 @@ except ImportError:  # pragma: no cover - depends on the python build
 
 APP_NAME = "Audio Continue"
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_WORKFLOW = os.path.join(HERE, "workflows", "ace15_audio_continue_api.json")
+DEFAULT_WORKFLOW = os.path.join(HERE, "workflows", "ace15xl_audio_continue_api.json")
+ARCHIVE_DIR = os.path.join(HERE, "workflows", "archive")
+GENERIC_WORKFLOW = os.path.join(ARCHIVE_DIR, "ace15_audio_continue_turbo_aio_api.json")
 CONFIG_PATH = os.environ.get(
     "AUDIO_CONTINUE_CONFIG", os.path.join(os.path.expanduser("~"), ".audio_continue.json")
 )
 
 REQUIRED_NODES = [
-    "CheckpointLoaderSimple",
+    "UNETLoader",
+    "DualCLIPLoader",
+    "VAELoader",
     "ModelSamplingAuraFlow",
     "LoadAudio",
     "AudioContinueExtend",
@@ -62,8 +67,44 @@ REQUIRED_NODES = [
     "ConditioningZeroOut",
     "KSampler",
     "VAEDecodeAudio",
-    "SaveAudio",
+    "SaveAudioAdvanced",
 ]
+
+# ACE-Step 1.5 checkpoints want very different sampler settings. The app keeps the numbers
+# in the workflow file, but shows these defaults so "Steps / CFG" does not silently turn an
+# SFT run into a turbo run.
+MODEL_PRESETS = {
+    "xl_sft": {
+        "label": "ACE-Step 1.5 XL SFT",
+        "steps": 50,
+        "cfg": 7.0,
+        "generate_audio_codes": True,
+        "match": ("xl_sft", "xl-base", "xl_base", "_sft", "_base"),
+    },
+    "xl_turbo": {
+        "label": "ACE-Step 1.5 XL Turbo",
+        "steps": 8,
+        "cfg": 1.0,
+        "generate_audio_codes": True,
+        "match": ("xl_turbo", "xl-turbo"),
+    },
+    "turbo_aio": {
+        "label": "ACE-Step 1.5 turbo (2B AIO)",
+        "steps": 8,
+        "cfg": 1.0,
+        "generate_audio_codes": True,
+        "match": ("turbo_aio", "1.5_turbo"),
+    },
+}
+
+# where each loader looks for its file, used by `Check setup` to say something useful
+LOADER_HINTS = {
+    "UNETLoader": (("unet_name",), "models/diffusion_models/"),
+    "CheckpointLoaderSimple": (("ckpt_name",), "models/checkpoints/"),
+    "DualCLIPLoader": (("clip_name1", "clip_name2"), "models/text_encoders/"),
+    "CLIPLoader": (("clip_name",), "models/text_encoders/"),
+    "VAELoader": (("vae_name",), "models/vae/"),
+}
 
 AUDIO_EXTENSIONS = (
     ".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".aif", ".aiff", ".wma",
@@ -101,8 +142,8 @@ class Settings:
     language: str = "en"
     seed: int = 31
     randomize_seed: bool = True
-    steps: int = 8
-    cfg: float = 1.0
+    steps: int = 50
+    cfg: float = 7.0
     generate_audio_codes: bool = True
     mask_mode: str = "generate_new_only"
     repaint_seconds: float = 0.0
@@ -412,14 +453,51 @@ def workflow_node_classes(workflow):
     return sorted({n.get("class_type") for n in workflow.values() if n.get("class_type")})
 
 
-def workflow_checkpoint(workflow):
+def model_preset(workflow):
+    """Guess the ACE-Step 1.5 variant from the workflow's model files.
+
+    Returns a MODEL_PRESETS entry (plus its key under "name") or None.
+    """
     for node in workflow.values():
-        if node.get("class_type") == "CheckpointLoaderSimple":
-            return (node.get("inputs") or {}).get("ckpt_name")
+        inputs = node.get("inputs") or {}
+        for key in ("unet_name", "ckpt_name"):
+            value = inputs.get(key)
+            if not isinstance(value, str):
+                continue
+            lowered = value.lower()
+            for name, preset in MODEL_PRESETS.items():
+                if any(token in lowered for token in preset["match"]):
+                    return dict(preset, name=name)
     return None
 
 
-def check_setup(client, node_classes=None, checkpoint=None):
+def workflow_assets(workflow):
+    """{class_type: [file names]} for every loader node in an API workflow."""
+    found = {}
+    for node in workflow.values():
+        ctype = node.get("class_type")
+        entry = LOADER_HINTS.get(ctype)
+        if not entry:
+            continue
+        keys = entry[0]
+        inputs = node.get("inputs") or {}
+        names = [inputs.get(key) for key in keys if isinstance(inputs.get(key), str)]
+        if names:
+            found.setdefault(ctype, []).extend(names)
+    return found
+
+
+def _loader_options(info, node_class, key):
+    """The list of installed files ComfyUI reports for a loader input."""
+    entry = info.get(node_class) or {}
+    required = (entry.get("input") or {}).get("required") or {}
+    value = required.get(key)
+    if isinstance(value, list) and value and isinstance(value[0], list):
+        return value[0]
+    return []
+
+
+def check_setup(client, node_classes=None, assets=None):
     lines = []
     try:
         stats = client.system_stats()
@@ -442,20 +520,36 @@ def check_setup(client, node_classes=None, checkpoint=None):
         lines.append("all required nodes present")
         ok = True
 
-    ckpts = []
-    try:
-        entry = info.get("CheckpointLoaderSimple") or client.object_info("CheckpointLoaderSimple")
-        ckpts = ((entry or {}).get("input", {}).get("required", {}).get("ckpt_name") or [[]])[0]
-    except (ComfyError, IndexError, AttributeError):
-        pass
-    if ckpts:
-        lines.append("checkpoints: " + ", ".join(map(str, ckpts[:12])))
-        if checkpoint:
-            if checkpoint not in ckpts:
-                lines.append(f"  ! workflow checkpoint '{checkpoint}' is not installed")
+    if assets is None:
+        # no workflow at hand: just report what is installed
+        assets = {"UNETLoader": [], "CheckpointLoaderSimple": []}
+
+    for node_class, names in assets.items():
+        keys, folder = LOADER_HINTS[node_class]
+        options = []
+        for key in keys:
+            for option in _loader_options(info, node_class, key):
+                if option not in options:  # DualCLIPLoader reports two lists
+                    options.append(option)
+        if not options:
+            continue
+        lines.append(f"{node_class} files: " + ", ".join(map(str, options[:12])))
+        for name in names:
+            if name not in options:
+                lines.append(f"  ! '{name}' is not installed -> put it in {folder}")
                 ok = False
-        elif not any("ace_step" in str(c).lower() for c in ckpts):
-            lines.append("  ! no ACE-Step checkpoint found (expected ace_step_1.5_turbo_aio.safetensors)")
+
+    if not any(names for names in assets.values()):
+        # nothing declared (custom workflow): fall back to "is any ACE-Step model there?"
+        models = []
+        for node_class in ("UNETLoader", "CheckpointLoaderSimple"):
+            for key in LOADER_HINTS[node_class][0]:
+                models += _loader_options(info, node_class, key)
+        if models and not any("ace" in str(m).lower() for m in models):
+            lines.append(
+                "  ! no ACE-Step model found (expected acestep_v1.5_xl_sft_bf16.safetensors in "
+                "models/diffusion_models/ or ace_step_1.5_turbo_aio.safetensors in models/checkpoints/)"
+            )
     return lines, ok
 
 
@@ -481,15 +575,20 @@ def main_cli(argv=None):
         settings.workflow = args.workflow
 
     if args.check:
-        node_classes = checkpoint = None
+        node_classes = assets = preset = None
         try:
             with open(settings.workflow, "r", encoding="utf-8") as fh:
                 workflow = json.load(fh)
             node_classes = workflow_node_classes(workflow)
-            checkpoint = workflow_checkpoint(workflow)
+            assets = workflow_assets(workflow)
+            preset = model_preset(workflow)
         except (OSError, ValueError) as exc:
             print(f"(could not read workflow: {exc}; checking the default node set)")
-        lines, ok = check_setup(ComfyClient(settings.comfy_url), node_classes, checkpoint)
+        lines, ok = check_setup(ComfyClient(settings.comfy_url), node_classes, assets)
+        if preset:
+            lines.append(
+                f"model preset: {preset['label']} -> {preset['steps']} steps, cfg {preset['cfg']}"
+            )
         print("\n".join(lines))
         return 0 if ok else 1
 
@@ -608,12 +707,12 @@ class App:
         )
 
         ttk.Label(box, text="Steps").grid(row=2, column=0, sticky="w", **pad)
-        self.steps_var = tk.StringVar(value="8")
-        ttk.Spinbox(box, from_=1, to=100, width=8, textvariable=self.steps_var).grid(
+        self.steps_var = tk.StringVar(value="50")
+        ttk.Spinbox(box, from_=1, to=150, width=8, textvariable=self.steps_var).grid(
             row=2, column=1, sticky="w", **pad
         )
         ttk.Label(box, text="CFG").grid(row=2, column=2, sticky="w", **pad)
-        self.cfg_var = tk.StringVar(value="1.0")
+        self.cfg_var = tk.StringVar(value="7.0")
         ttk.Spinbox(box, from_=0, to=20, increment=0.5, width=8, textvariable=self.cfg_var).grid(
             row=2, column=3, sticky="w", **pad
         )
@@ -631,6 +730,9 @@ class App:
         ttk.Checkbutton(
             box, text="LM audio-code planning (generate_audio_codes)", variable=self.codes_var
         ).grid(row=3, column=2, columnspan=4, sticky="w", **pad)
+        ttk.Button(
+            box, text="Sampler defaults for this workflow", command=self.on_apply_preset
+        ).grid(row=4, column=0, columnspan=3, sticky="w", **pad)
 
         # description
         box = ttk.LabelFrame(outer, text="Music description (what the continuation should sound like)", padding=6)
@@ -727,8 +829,8 @@ class App:
         s.bpm = int(_as_float(self.bpm_var.get(), 120))
         s.keyscale = self.key_var.get()
         s.language = self.lang_var.get()
-        s.steps = int(_as_float(self.steps_var.get(), 8))
-        s.cfg = _as_float(self.cfg_var.get(), 1.0)
+        s.steps = int(_as_float(self.steps_var.get(), 50))
+        s.cfg = _as_float(self.cfg_var.get(), 7.0)
         s.seed = int(_as_float(self.seed_var.get(), 31))
         s.randomize_seed = bool(self.random_var.get())
         s.generate_audio_codes = bool(self.codes_var.get())
@@ -775,6 +877,30 @@ class App:
         )
         if path:
             self.workflow_var.set(path)
+            self._apply_model_defaults(path)
+
+    def on_apply_preset(self):
+        self._apply_model_defaults(self.workflow_var.get().strip() or DEFAULT_WORKFLOW)
+
+    def _apply_model_defaults(self, path):
+        """Copy the model's recommended sampler numbers into the Steps / CFG fields."""
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                workflow = json.load(fh)
+        except (OSError, ValueError) as exc:
+            self._log(f"could not read workflow ({exc})")
+            return
+        preset = model_preset(workflow)
+        if not preset:
+            self._log("model variant not recognised - steps / CFG left as they are")
+            return
+        self.steps_var.set(str(preset["steps"]))
+        self.cfg_var.set(str(preset["cfg"]))
+        self.codes_var.set(bool(preset["generate_audio_codes"]))
+        self._log(
+            f"{preset['label']}: {preset['steps']} steps, cfg {preset['cfg']} "
+            "(change this only if you know what you are doing)"
+        )
 
     def on_pick_outdir(self):
         path = filedialog.askdirectory(title="Where to save the continued file")
@@ -789,15 +915,20 @@ class App:
         save_settings(settings)
 
         def job():
-            node_classes = checkpoint = None
+            node_classes = assets = preset = None
             try:
                 with open(settings.workflow, "r", encoding="utf-8") as fh:
                     workflow = json.load(fh)
                 node_classes = workflow_node_classes(workflow)
-                checkpoint = workflow_checkpoint(workflow)
+                assets = workflow_assets(workflow)
+                preset = model_preset(workflow)
             except (OSError, ValueError) as exc:
                 self._log(f"could not read workflow ({exc}); checking the default node set")
-            lines, ok = check_setup(ComfyClient(settings.comfy_url), node_classes, checkpoint)
+            lines, ok = check_setup(ComfyClient(settings.comfy_url), node_classes, assets)
+            if preset:
+                lines.append(
+                    f"model preset: {preset['label']} -> {preset['steps']} steps, cfg {preset['cfg']}"
+                )
             for line in lines:
                 self._log(line)
             self._status("ready" if ok else "setup incomplete")
@@ -909,7 +1040,7 @@ class App:
 
         self._log(f"checking setup ({len(workflow)} nodes in workflow)")
         lines, ok = check_setup(
-            client, workflow_node_classes(workflow), workflow_checkpoint(workflow)
+            client, workflow_node_classes(workflow), workflow_assets(workflow)
         )
         for line in lines:
             self._log("  " + line)

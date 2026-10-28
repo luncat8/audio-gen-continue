@@ -42,7 +42,7 @@
       ],
       "vae": [
         "1",
-        2
+        0
       ]
     },
     "_meta": {
@@ -71,7 +71,7 @@
       "min_p": 0.0,
       "clip": [
         "1",
-        1
+        0
       ]
     },
     "_meta": {
@@ -129,7 +129,7 @@
       ],
       "vae": [
         "1",
-        2
+        0
       ]
     },
     "_meta": {
@@ -155,9 +155,10 @@
     }
   },
   "10": {
-    "class_type": "SaveAudio",
+    "class_type": "SaveAudioAdvanced",
     "inputs": {
       "filename_prefix": "audio-continue/audio",
+      "format": "flac",
       "audio": [
         "9",
         0

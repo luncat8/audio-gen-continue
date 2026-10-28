@@ -18,8 +18,19 @@ sys.path.insert(0, HERE)
 import audio_continue_tk as app  # noqa: E402
 from fake_comfyui import FakeState, start_server  # noqa: E402
 
-API_WORKFLOW = os.path.join(ROOT, "workflows", "ace15_audio_continue_api.json")
-UI_WORKFLOW = os.path.join(ROOT, "workflows", "ace15_audio_continue_ui.json")
+API_WORKFLOW = os.path.join(ROOT, "workflows", "ace15xl_audio_continue_api.json")
+UI_WORKFLOW = os.path.join(ROOT, "workflows", "ace15xl_audio_continue_ui.json")
+ARCHIVE_API = os.path.join(ROOT, "workflows", "archive", "ace15_audio_continue_turbo_aio_api.json")
+ARCHIVE_UI = os.path.join(ROOT, "workflows", "archive", "ace15_audio_continue_turbo_aio_ui.json")
+
+
+def load(path):
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def by_class(workflow, class_type):
+    return {nid: n for nid, n in workflow.items() if n.get("class_type") == class_type}
 
 
 class FakeServerCase(unittest.TestCase):
@@ -37,8 +48,7 @@ class FakeServerCase(unittest.TestCase):
 
 class TestWorkflowFiles(unittest.TestCase):
     def test_api_workflow_is_valid_prompt_graph(self):
-        with open(API_WORKFLOW, encoding="utf-8") as fh:
-            wf = json.load(fh)
+        wf = load(API_WORKFLOW)
         for nid, node in wf.items():
             self.assertIn("class_type", node, nid)
             self.assertIn("inputs", node, nid)
@@ -46,9 +56,46 @@ class TestWorkflowFiles(unittest.TestCase):
                 if isinstance(value, list) and len(value) == 2 and isinstance(value[1], int):
                     self.assertIn(value[0], wf, f"{nid}.{key} points at a missing node")
 
+    def test_archived_aio_workflow_is_valid_too(self):
+        wf = load(ARCHIVE_API)
+        for nid, node in wf.items():
+            self.assertIn("class_type", node, nid)
+            self.assertIn("inputs", node, nid)
+            for key, value in node["inputs"].items():
+                if isinstance(value, list) and len(value) == 2 and isinstance(value[1], int):
+                    self.assertIn(value[0], wf, f"{nid}.{key} points at a missing node")
+        self.assertTrue(by_class(wf, "CheckpointLoaderSimple"))
+        self.assertTrue(os.path.isfile(ARCHIVE_UI))
+
+    def test_default_workflow_is_the_xl_split_graph(self):
+        wf = load(API_WORKFLOW)
+        self.assertEqual(app.DEFAULT_WORKFLOW, API_WORKFLOW)
+        unet = list(by_class(wf, "UNETLoader").values())[0]["inputs"]
+        self.assertEqual(unet["unet_name"], "acestep_v1.5_xl_sft_bf16.safetensors")
+        clip = list(by_class(wf, "DualCLIPLoader").values())[0]["inputs"]
+        self.assertEqual(clip["clip_name1"], "qwen_0.6b_ace15.safetensors")
+        self.assertEqual(clip["clip_name2"], "qwen_4b_ace15.safetensors")
+        self.assertEqual(clip["type"], "ace")
+        self.assertEqual(list(by_class(wf, "VAELoader").values())[0]["inputs"]["vae_name"],
+                         "ace_1.5_vae.safetensors")
+        self.assertEqual(by_class(wf, "CheckpointLoaderSimple"), {})
+        sampler = list(by_class(wf, "KSampler").values())[0]["inputs"]
+        self.assertEqual((sampler["steps"], sampler["cfg"]), (50, 7.0))
+        self.assertEqual(sampler["sampler_name"], "euler")
+        self.assertEqual(sampler["scheduler"], "simple")
+        self.assertEqual(sampler["denoise"], 1.0)
+
+    def test_extend_node_gets_vae_and_clip_from_the_split_loaders(self):
+        wf = load(API_WORKFLOW)
+        vae_id = next(iter(by_class(wf, "VAELoader")))
+        clip_id = next(iter(by_class(wf, "DualCLIPLoader")))
+        extend = list(by_class(wf, "AudioContinueExtend").values())[0]["inputs"]
+        encode = list(by_class(wf, "TextEncodeAceStepAudio1.5").values())[0]["inputs"]
+        self.assertEqual(extend["vae"], [vae_id, 0])
+        self.assertEqual(encode["clip"], [clip_id, 0])
+
     def test_ui_workflow_links_are_consistent(self):
-        with open(UI_WORKFLOW, encoding="utf-8") as fh:
-            ui = json.load(fh)
+        ui = load(UI_WORKFLOW)
         nodes = {n["id"]: n for n in ui["nodes"]}
         self.assertEqual(ui["last_node_id"], max(nodes))
         targets = set()
@@ -65,20 +112,45 @@ class TestWorkflowFiles(unittest.TestCase):
         self.assertIn(ui["last_link_id"], [link[0] for link in ui["links"]])
 
     def test_extend_output_feeds_text_encode_duration(self):
-        with open(API_WORKFLOW, encoding="utf-8") as fh:
-            wf = json.load(fh)
-        by_class = {}
-        for nid, node in wf.items():
-            by_class.setdefault(node["class_type"], []).append(nid)
-        extend = by_class["AudioContinueExtend"][0]
-        encode = by_class["TextEncodeAceStepAudio1.5"][0]
-        self.assertEqual(wf[encode]["inputs"]["duration"], [extend, 3])
+        for path in (API_WORKFLOW, ARCHIVE_API):
+            wf = load(path)
+            extend = next(iter(by_class(wf, "AudioContinueExtend")))
+            encode = next(iter(by_class(wf, "TextEncodeAceStepAudio1.5")))
+            self.assertEqual(wf[encode]["inputs"]["duration"], [extend, 3], path)
+
+
+class TestModelPreset(unittest.TestCase):
+    def test_xl_sft_workflow(self):
+        preset = app.model_preset(load(API_WORKFLOW))
+        self.assertEqual(preset["name"], "xl_sft")
+        self.assertEqual((preset["steps"], preset["cfg"]), (50, 7.0))
+
+    def test_archived_aio_workflow(self):
+        preset = app.model_preset(load(ARCHIVE_API))
+        self.assertEqual(preset["name"], "turbo_aio")
+        self.assertEqual((preset["steps"], preset["cfg"]), (8, 1.0))
+
+    def test_xl_turbo_is_recognised(self):
+        wf = load(API_WORKFLOW)
+        next(iter(by_class(wf, "UNETLoader").values()))["inputs"]["unet_name"] = \
+            "acestep_v1.5_xl_turbo_bf16.safetensors"
+        self.assertEqual(app.model_preset(wf)["name"], "xl_turbo")
+
+    def test_unknown_workflow(self):
+        self.assertIsNone(app.model_preset({"1": {"class_type": "LoadAudio", "inputs": {}}}))
+
+    def test_assets_are_collected(self):
+        assets = app.workflow_assets(load(API_WORKFLOW))
+        self.assertEqual(assets["UNETLoader"], ["acestep_v1.5_xl_sft_bf16.safetensors"])
+        self.assertEqual(assets["DualCLIPLoader"],
+                         ["qwen_0.6b_ace15.safetensors", "qwen_4b_ace15.safetensors"])
+        self.assertEqual(assets["VAELoader"], ["ace_1.5_vae.safetensors"])
+        self.assertNotIn("CheckpointLoaderSimple", assets)
 
 
 class TestPatchWorkflow(unittest.TestCase):
     def setUp(self):
-        with open(API_WORKFLOW, encoding="utf-8") as fh:
-            self.workflow = json.load(fh)
+        self.workflow = load(API_WORKFLOW)
         self.settings = app.Settings(add_seconds=42.5, seed=7, steps=12, cfg=2.0, bpm=96,
                                      keyscale="A minor", tags="test tags", lyrics="la la",
                                      save_prefix="audio-continue/mine", crossfade=2.5)
@@ -103,6 +175,13 @@ class TestPatchWorkflow(unittest.TestCase):
         app.patch_workflow(self.workflow, self.settings, uploaded_name="x.wav")
         self.assertEqual(before, json.dumps(self.workflow))
 
+    def test_split_loaders_are_left_alone(self):
+        patched = app.patch_workflow(self.workflow, self.settings, uploaded_name="song.wav")
+        self.assertEqual(patched["1"]["inputs"]["unet_name"],
+                         "acestep_v1.5_xl_sft_bf16.safetensors")
+        self.assertEqual(patched["12"]["inputs"]["clip_name2"], "qwen_4b_ace15.safetensors")
+        self.assertEqual(patched["13"]["inputs"]["vae_name"], "ace_1.5_vae.safetensors")
+
     def test_missing_nodes_raise(self):
         partial = {k: v for k, v in self.workflow.items() if v["class_type"] != "AudioContinueExtend"}
         with self.assertRaises(app.ComfyError):
@@ -124,6 +203,22 @@ class TestClientHappyPath(FakeServerCase):
         self.assertTrue(ok, lines)
         self.assertTrue(any("ComfyUI OK" in line for line in lines))
 
+    def test_check_setup_with_xl_assets(self):
+        wf = load(API_WORKFLOW)
+        lines, ok = app.check_setup(
+            self.client, app.workflow_node_classes(wf), app.workflow_assets(wf)
+        )
+        self.assertTrue(ok, lines)
+        self.assertTrue(any("acestep_v1.5_xl_sft_bf16.safetensors" in line for line in lines))
+
+    def test_check_setup_reports_missing_diffusion_model(self):
+        wf = load(API_WORKFLOW)
+        assets = app.workflow_assets(wf)
+        assets["UNETLoader"] = ["acestep_v1.5_xl_nope_bf16.safetensors"]
+        lines, ok = app.check_setup(self.client, app.workflow_node_classes(wf), assets)
+        self.assertFalse(ok)
+        self.assertTrue(any("models/diffusion_models" in line for line in lines), lines)
+
     def test_full_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
             audio = os.path.join(tmp, "song with spaces & stuff.wav")
@@ -134,8 +229,7 @@ class TestClientHappyPath(FakeServerCase):
             self.assertIn("song", uploaded)
             self.assertTrue(self.state.uploads, "server saw no upload")
 
-            with open(API_WORKFLOW, encoding="utf-8") as fh:
-                workflow = json.load(fh)
+            workflow = load(API_WORKFLOW)
             settings = app.Settings(seed=5)
             prompt = app.patch_workflow(workflow, settings, uploaded_name=uploaded)
             self.assertEqual(prompt["3"]["inputs"]["audio"], uploaded)

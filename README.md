@@ -1,5 +1,7 @@
 # audio-gen-continue
 
+TLDR: it works somehow but quality and continuation is not acceptable, need to try next year with better models. TODO: good captioner, best if capable to detect key, BMP, and vocal type.
+
 Continue an existing music file with ComfyUI. Pick a track, say how many seconds to add,
 press **Generate** — you get `yourtrack_continue+30s_20261027-183000.flac` with your
 original audio preserved and a seamless generated tail.
@@ -17,9 +19,20 @@ original audio preserved and a seamless generated tail.
                                             SaveAudio → output/audio-continue/
 ```
 
-Model: **ACE-Step 1.5 turbo** (AIO checkpoint), 48 kHz, ~8 steps. See
-[RESEARCH.md](RESEARCH.md) for why this model, and why the "just VAE-encode it into a
-KSampler" idea is only half right.
+Model: **ACE-Step 1.5 XL SFT** (split files: 4B DiT + Qwen text encoders + VAE), 48 kHz,
+50 steps / CFG 7.0. See [RESEARCH.md](RESEARCH.md) for why this model, why the XL variant,
+and why the "just VAE-encode it into a KSampler" idea is only half right.
+
+Two model layouts are supported; the workflow decides which one is used:
+
+| Workflow | Model files | Steps / CFG |
+| --- | --- | --- |
+| `workflows/ace15xl_audio_continue_api.json` (**default**) | `diffusion_models/acestep_v1.5_xl_sft_bf16` + `text_encoders/qwen_0.6b_ace15` + `qwen_4b_ace15` + `vae/ace_1.5_vae` | 50 / 7.0 |
+| `workflows/archive/ace15_audio_continue_turbo_aio_api.json` (archived) | `checkpoints/ace_step_1.5_turbo_aio` | 8 / 1.0 |
+
+The archived workflow is the previous 2B turbo AIO setup. It still works (same nodes, same
+`AudioContinueExtend`/`AudioContinueStitch`), it just uses the single checkpoint and a much
+lower VRAM footprint. Load it with **Workflow...** in the app.
 
 ---
 
@@ -29,9 +42,10 @@ KSampler" idea is only half right.
   `TextEncodeAceStepAudio1.5` exists in the node search).
 * Python 3.9+ with **tkinter** for the GUI (Debian/Ubuntu: `sudo apt install python3-tk`).
   The app itself has **no pip dependencies** — stdlib only.
-* GPU: ~8 GB VRAM recommended for the 2B turbo AIO (works on less with the LM disabled —
-  untick `generate_audio_codes` in the app). No GPU is used by the Tk app, it only talks
-  HTTP to ComfyUI.
+* GPU: **≥12 GB VRAM** for XL with ComfyUI offloading, **≥20 GB** for a comfortable run
+  (XL DiT ≈10 GB bf16 + 4B text encoder ≈8 GB). ~8 GB is enough for the archived 2B turbo
+  AIO workflow, especially with the LM disabled (untick `generate_audio_codes`).
+  No GPU is used by the Tk app, it only talks HTTP to ComfyUI.
 
 ## 2. Install the custom nodes (2 nodes, no dependencies)
 
@@ -45,20 +59,46 @@ Restart ComfyUI, then in the node search you should find
 
 They only use `torch` + `comfy.audio.resample`, i.e. what ComfyUI already ships.
 
-## 3. Download the model (10 GB, one file)
+## 3. Download the model (XL SFT, 4 files ≈ 20 GB)
 
 ```bash
+cd /path/to/ComfyUI/models
+
 huggingface-cli download Comfy-Org/ace_step_1.5_ComfyUI_files \
-  checkpoints/ace_step_1.5_turbo_aio.safetensors \
-  --local-dir /path/to/ComfyUI/models
-mv /path/to/ComfyUI/models/checkpoints/ace_step_1.5_turbo_aio.safetensors \
-   /path/to/ComfyUI/models/checkpoints/
+  split_files/diffusion_models/acestep_v1.5_xl_sft_bf16.safetensors \
+  --local-dir /tmp/ace15
+mv /tmp/ace15/split_files/diffusion_models/acestep_v1.5_xl_sft_bf16.safetensors \
+   diffusion_models/
+
+huggingface-cli download Comfy-Org/ace_step_1.5_ComfyUI_files \
+  split_files/text_encoders/qwen_0.6b_ace15.safetensors \
+  split_files/text_encoders/qwen_4b_ace15.safetensors \
+  split_files/vae/ace_1.5_vae.safetensors \
+  --local-dir /tmp/ace15
+mv /tmp/ace15/split_files/text_encoders/*.safetensors text_encoders/
+mv /tmp/ace15/split_files/vae/ace_1.5_vae.safetensors     vae/
 ```
 
-(or download it in the browser:
-<https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/tree/main/checkpoints>)
+(or download them in the browser:
+<https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/tree/main/split_files>)
 
-Make sure the final path is `ComfyUI/models/checkpoints/ace_step_1.5_turbo_aio.safetensors`.
+Final layout:
+
+```
+ComfyUI/models/
+├── diffusion_models/acestep_v1.5_xl_sft_bf16.safetensors   (9.97 GB)
+├── text_encoders/qwen_0.6b_ace15.safetensors               (1.19 GB, slot 1, mandatory)
+├── text_encoders/qwen_4b_ace15.safetensors                 (8.38 GB, slot 2)
+└── vae/ace_1.5_vae.safetensors                             (0.34 GB)
+```
+
+Small GPU / less patience: swap the diffusion model for
+`acestep_v1.5_xl_turbo_bf16.safetensors` (8 steps, CFG 1.0 — press **Sampler defaults for
+this workflow** in the app afterwards), or use `qwen_1.7b_ace15` in clip slot 2.
+
+Archived 2B setup (unchanged): the single 10 GB file
+`ComfyUI/models/checkpoints/ace_step_1.5_turbo_aio.safetensors` from
+<https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/tree/main/checkpoints>.
 
 ## 4. Run the GUI
 
@@ -74,7 +114,7 @@ python3 audio_continue_tk.py
 | **Join crossfade** | Where the generated audio takes over from your original file (0.5–2 s is a good range). |
 | **Mask mode** | `generate_new_only` = only append. `repaint_tail` = also regenerate the last seconds of the source so the model can re-do the join (set `repaint_seconds` in the workflow) — use it when the seam is audible. |
 | **BPM / Key** | BPM and key **of the source track**. This is the biggest continuity win; ACE-Step conditions on both. |
-| **Steps / CFG** | 8 / 1.0 for the turbo checkpoint. Raise steps (16–24) for a cleaner tail; keep CFG at 1.0. |
+| **Steps / CFG** | 50 / 7.0 for XL SFT (what the shipped workflow uses), 8 / 1.0 for XL turbo or the archived 2B AIO. **Sampler defaults for this workflow** re-reads these from the loaded workflow so you cannot accidentally run an SFT model at turbo settings. |
 | **Seed** | `new seed each run` keeps rolling; untick to reproduce a take. |
 | **LM audio-code planning** | `generate_audio_codes`. Faster and more "prefix-driven" when off; more detailed arrangement when on. |
 | **Music description** | Tags describing the *existing* arrangement ("same instruments, same mix, no intro"). Not a new song idea. |
@@ -88,7 +128,7 @@ Everything (last file, last folder, server, all parameters, window size) is save
 
 ## 5. Test the graph in ComfyUI itself
 
-`workflows/ace15_audio_continue_ui.json` is a normal UI workflow — drag it onto the canvas:
+`workflows/ace15xl_audio_continue_ui.json` is a normal UI workflow — drag it onto the canvas:
 
 1. `Load Audio` → upload your track.
 2. `Audio Continue (extend latent)` → set `add_seconds`.
@@ -99,11 +139,17 @@ The `duration` input of the text encoder is already wired to the extend node's
 `total_seconds` output, so the model knows how long the final track is. Longer/shorter
 than that and the model ends the song early.
 
-`workflows/ace15_audio_continue_api.json` is the same graph in **API format**; that is the
-file the GUI patches and posts to `/prompt`. Edit it (or point the GUI at your own file)
-and the app keeps working as long as the node classes are the ones it knows.
+`workflows/ace15xl_audio_continue_api.json` is the same graph in **API format**; that is
+the file the GUI patches and posts to `/prompt`. Edit it (or point the GUI at your own
+file) and the app keeps working as long as the node classes are the ones it knows.
 
-Regenerate both files after editing the graph definition:
+`workflows/archive/` holds the previous 2B turbo AIO pair
+(`ace15_audio_continue_turbo_aio_ui.json` / `..._api.json`). Drag the UI one onto the
+canvas or select the API one with **Workflow...** — remember that it wants 8 steps / CFG 1
+and `models/checkpoints/ace_step_1.5_turbo_aio.safetensors`.
+
+Regenerate all four files after editing the graph definitions (`tools/build_workflows.py`
+contains the XL and the archived AIO graph):
 
 ```bash
 python3 tools/build_workflows.py
@@ -124,13 +170,14 @@ python3 audio_continue_tk.py --dry-run --audio song.mp3 --add 30 --out patched.j
 ## 7. Files
 
 ```
-audio_continue_tk.py              the Tk app (GUI + --check / --dry-run)
-comfyui_audio_continue/           ComfyUI custom node pack (2 nodes)
-workflows/ace15_audio_continue_ui.json    drag & drop into ComfyUI
-workflows/ace15_audio_continue_api.json   what the app posts to /prompt
-tools/build_workflows.py          generates both workflow files
-tests/                            headless tests (fake ComfyUI server + numpy torch stub)
-RESEARCH.md                       model/workflow investigation, sources, caveats
+audio_continue_tk.py                            the Tk app (GUI + --check / --dry-run)
+comfyui_audio_continue/                         ComfyUI custom node pack (2 nodes)
+workflows/ace15xl_audio_continue_ui.json        default: XL SFT, drag & drop into ComfyUI
+workflows/ace15xl_audio_continue_api.json       default: what the app posts to /prompt
+workflows/archive/ace15_audio_continue_turbo_aio_{ui,api}.json   archived 2B turbo AIO pair
+tools/build_workflows.py                        generates all four workflow files
+tests/                                          headless tests (fake ComfyUI server + numpy torch stub)
+RESEARCH.md                                     model/workflow investigation, sources, caveats
 ```
 
 ## 8. Troubleshooting
@@ -139,21 +186,24 @@ RESEARCH.md                       model/workflow investigation, sources, caveats
 | --- | --- |
 | `setup check failed` / missing node | The node pack is not in `ComfyUI/custom_nodes/` or ComfyUI was not restarted. Check the startup console for import errors. |
 | `TextEncodeAceStepAudio1.5` missing | ComfyUI is older than v0.12 — update ComfyUI. |
-| `no ACE-Step checkpoint found` | The AIO file has to be in `models/checkpoints/` with the exact name. |
+| `'...' is not installed -> put it in models/...` | The XL files are not where the workflow looks: `diffusion_models/acestep_v1.5_xl_sft_bf16.safetensors`, `text_encoders/qwen_0.6b_ace15.safetensors` + `qwen_4b_ace15.safetensors`, `vae/ace_1.5_vae.safetensors`. For the archived AIO workflow: `checkpoints/ace_step_1.5_turbo_aio.safetensors`. |
+| Errors mentioning `clip_name2` / garbage text conditioning | `qwen_0.6b_ace15` must be in slot **1** (`clip_name1`); XL does not accept 4B in slot 1. |
 | Tail starts too loud / quiet, or has a click | Raise `Join crossfade`, or use `repaint_tail` with `repaint_seconds` 2–4. Check that BPM/key match the source. |
 | Continuation drifts into a different song | Turn **LM audio-code planning** off, write tags that describe the *current* arrangement, set the real BPM/key, keep `add_seconds` ≤ 60 per run and run the app again on the result. |
 | Model ends the song before the requested length | The `duration` link is missing in your workflow — reconnect `total_seconds` → `TextEncodeAceStepAudio1.5.duration`. |
-| Out of VRAM | Untick LM audio-code planning (~4 GB), or use the split files with `qwen_0.6b_ace15` instead of the AIO. The masked prefix is attended to at every step, so a 10-minute source is much heavier than a 2-minute one. |
+| Out of VRAM | XL needs ≥12 GB (≥20 GB comfortable): swap `qwen_4b_ace15` for `qwen_1.7b_ace15`, untick LM audio-code planning, use `acestep_v1.5_xl_turbo_bf16` (8 steps), or fall back to the archived 2B AIO workflow (~8 GB). The masked prefix is attended to at every step, so a 10-minute source is much heavier than a 2-minute one. |
 | Long source track is very slow | Continue a tail instead: cut the last ~60 s in any editor, continue that file, then join it to the rest (the join is what the crossfade is for). |
 | Upload fails on a remote server | ComfyUI must be reachable over HTTP; if it sits behind a path prefix, put the full URL (including the path) into **Server**. |
-| Result is FLAC and large | `SaveAudio` writes FLAC by default; swap it for `SaveAudioAdvanced` (mp3) in the workflow and set `filename_prefix` as usual — the app picks up any audio in the history output. |
+| Result is FLAC and large | `SaveAudioAdvanced` writes FLAC in the shipped workflows; change its `format` widget to `mp3` (or swap in `SaveAudio`) and keep `filename_prefix` — the app picks up any audio in the history output. |
 
 ## 9. Other models / packs
 
 The app patches nodes by **class name**, so it also works with workflows built on
 `starsFriday/ComfyUI-ACEStep` (`ACEStep15XLExtendAudio` + `ACEStep15XLExtendLatent`,
 `ACEStep15XLTextEncode`) — point **Workflow...** at such an API workflow and the same fields
-are applied. See [RESEARCH.md](RESEARCH.md) §4 for the list of existing continuation
+are applied. The XL split layout (`UNETLoader` + `DualCLIPLoader` + `VAELoader`) is what the
+default workflow uses; `CheckpointLoaderSimple` (the archived AIO workflow) and any other
+ACE-Step 1.5 loader combination work the same way in the app. See [RESEARCH.md](RESEARCH.md) §4 for the list of existing continuation
 workflows (ACE-Step 1.0 extend, MiniMax Music 3 extend, MusicGen continuation, Stable
 Audio 3 inpainting) and §6 for when to reach for them.
 

@@ -42,8 +42,34 @@ ones this project uses.
 | MusicGen small/medium | yes, small ~1 GB VRAM | `generate_continuation` (audio prompt, 30 s windows) | no | 30 s window, chainable | 2023-era quality, smeary tails — fine for ambience, not for songs | `eigenpunk/ComfyUI-audio` (`MusicgenGenerate` with continuation) |
 | Stable Audio Open 1.0 | yes | no (fixed ~47 s; `seconds_start` conditioning only) | no | 47 s | not usable for continuation | native (legacy) |
 
-**Verdict: use ACE-Step 1.5 turbo (AIO).** Keep Stable Audio 3 medium as the
-instrumental-only fallback if ACE-Step's continuation drifts stylistically.
+**Verdict: use ACE-Step 1.5 XL (SFT, split files) — that is the default workflow of this
+repo since the XL release.** The 2B turbo AIO checkpoint still works and its workflow is
+archived in `workflows/archive/` for people with <12 GB VRAM. Keep Stable Audio 3 medium
+as the instrumental-only fallback if ACE-Step's continuation drifts stylistically.
+
+Why XL: it is the same ACE-Step 1.5 architecture (same VAE, same text encoders, same
+`TextEncodeAceStepAudio1.5` / `KSampler` / `ModelSamplingAuraFlow` nodes, same
+repaint/extend training task) with a 4B DiT instead of 2B — better prompt adherence,
+cleaner timbre and fewer metallic artefacts in generated tails. Nothing in the
+continuation mechanism changes: mask + `denoise 1.0` + `duration` conditioning are
+handled by ComfyUI core and the two custom nodes, not by the checkpoint. Only the
+**loader layout** (split files instead of the AIO checkpoint) and the **sampler numbers**
+(SFT = 50 steps / CFG 7, turbo = 8 steps / CFG 1) differ.
+
+| Variant | File (`models/diffusion_models/`) | Steps | CFG | Notes |
+| --- | --- | --- | --- | --- |
+| **xl_sft** (default) | `acestep_v1.5_xl_sft_bf16.safetensors` | 50 | 7.0 | best quality, slowest; official template numbers |
+| xl_turbo | `acestep_v1.5_xl_turbo_bf16.safetensors` | 8 | 1.0 | ~6× faster, slightly less refined |
+| xl_base | `acestep_v1.5_xl_base_bf16.safetensors` | 50 | 7.0 | non-distilled base |
+| turbo AIO (archived) | `models/checkpoints/ace_step_1.5_turbo_aio.safetensors` | 8 | 1.0 | 2B, ~8 GB VRAM |
+
+Text encoders are the same in all cases: `DualCLIPLoader` type `ace` with
+`qwen_0.6b_ace15` (slot 1, mandatory) + `qwen_4b_ace15` (slot 2; `qwen_1.7b_ace15` if VRAM
+is tight). VAE: `ace_1.5_vae.safetensors`, i.e. the same 48 kHz / 25 fps latent space, so
+`AudioContinueExtend`/`AudioContinueStitch` need no changes for XL.
+
+VRAM: XL DiT ≈10 GB bf16, 4B text encoder ≈8 GB — ≥12 GB with ComfyUI offloading, ≥20 GB
+comfortable. That is the only real trade-off against the archived 2B AIO workflow.
 
 ---
 
@@ -95,7 +121,8 @@ crossfade back into the original).
 
 | Workflow / pack | Model | What it gives you | Notes |
 | --- | --- | --- | --- |
-| **Official template** `audio_ace_step_1_5_checkpoint` (Comfy-Org/workflow_templates) | ACE-Step 1.5 | text→song, 8 steps, cfg 1, `euler/simple`, shift 3 | the base graph this repo's workflow is built from; no extend node |
+| **Official template** `audio_ace_step1_5_xl_sft` (Comfy-Org/workflow_templates) | ACE-Step 1.5 XL | text→song, 50 steps, cfg 7, `euler/simple`, shift 3 | the base graph the default XL workflow is built from; no extend node |
+| **Official template** `audio_ace_step_1_5_checkpoint` (same repo) | ACE-Step 1.5 (2B AIO) | text→song, 8 steps, cfg 1 | base graph of the archived AIO workflow |
 | **starsFriday/ComfyUI-ACEStep** | ACE-Step 1.5 / XL | `ACEStep15XLExtendAudio` (append silence + mask), `ACEStep15XLRepaintAudio`, `ReferenceLatent`, example workflow `workflows/ace_step_15xl_extend_audio.json` | **closest existing "continuation" workflow**; does *not* stitch the original back, and the reference-latent node needs the same mask plumbing; requires the pack |
 | **billwuhao/ComfyUI_ACE-Step** | ACE-Step 1.0 | `ACEStepExtend` (left/right seconds, overlapped decode) → calls the official pipeline `task="extend"` | real model-native extend (the pipeline does the repaint boundaries for you) but ACE 1.0 quality |
 | **ComfyUI_RyanOnTheInside** | ACE-Step 1.5 | native guiders incl. **Extend/Repaint** and Cover, plus audio KSamplers | good if you already use that pack |
@@ -142,6 +169,9 @@ Verified numbers for ACE-Step 1.5 in ComfyUI (from the source, not guessed):
 * the VAE round-trips through `vae.audio_sample_rate = 48000`, so an mp3/wav source is
   resampled by ComfyUI before encoding — lengths stay in seconds, not samples;
 * turbo = **8 steps, cfg 1.0, euler + simple, `ModelSamplingAuraFlow` shift 3.0**;
+* **XL SFT/base = 50 steps, cfg 7.0**, euler + simple, shift 3.0, `ConditioningZeroOut` as
+  negative (the official `audio_ace_step1_5_xl_sft` template — CFG 7 makes the negative
+  branch actually matter, unlike turbo's cfg 1); XL turbo keeps 8 steps / cfg 1.0;
 * `ConditioningZeroOut` is used as the negative because cfg 1 makes it irrelevant;
 * `filename_prefix = "audio-continue/audio"` → `ComfyUI/output/audio-continue/audio_00001_.flac`.
 
@@ -194,7 +224,9 @@ Official templates / docs:
 * https://github.com/Comfy-Org/workflow_templates — `audio_ace_step_1_5_checkpoint.json`, `audio_ace_step_1_5_split.json`, `audio_stable_audio_3_medium_base.json`
 * https://docs.comfy.org/tutorials/audio/ace-step/ace-step-v1-5 (also lists Cover/Repaint as "coming soon" to ComfyUI)
 * https://docs.comfy.org/tutorials/audio/stable-audio/stable-audio-3
-* https://github.com/Comfy-Org/ace_step_1.5_ComfyUI_files (AIO checkpoint, 10.0 GB)
+* https://github.com/Comfy-Org/ace_step_1.5_ComfyUI_files (AIO checkpoint 10.0 GB + split
+  files: XL base/sft/turbo ≈9.97 GB, `qwen_0.6b_ace15` 1.19 GB, `qwen_4b_ace15` 8.38 GB,
+  `ace_1.5_vae` 0.34 GB)
 
 Models / workflows:
 

@@ -9,10 +9,33 @@ from urllib.parse import urlparse, parse_qs
 
 AUDIO_BYTES = b"fLaC\x00\x00\x00\x22fake-flac-payload"
 
+XL_UNET = "acestep_v1.5_xl_sft_bf16.safetensors"
+XL_CLIPS = ["qwen_0.6b_ace15.safetensors", "qwen_4b_ace15.safetensors"]
+XL_VAE = "ace_1.5_vae.safetensors"
+
 NODES = {
     "CheckpointLoaderSimple": {"input": {"required": {"ckpt_name": [["ace_step_1.5_turbo_aio.safetensors"]]}}},
+    "UNETLoader": {
+        "input": {
+            "required": {
+                "unet_name": [["acestep_v1.5_xl_sft_bf16.safetensors", "acestep_v1.5_xl_turbo_bf16.safetensors"]],
+                "weight_dtype": [["default", "fp8_e4m3fn"]],
+            }
+        }
+    },
+    "DualCLIPLoader": {
+        "input": {
+            "required": {
+                "clip_name1": [["qwen_0.6b_ace15.safetensors", "qwen_1.7b_ace15.safetensors"]],
+                "clip_name2": [["qwen_4b_ace15.safetensors", "qwen_0.6b_ace15.safetensors"]],
+                "type": [["ace", "sdxl"]],
+            }
+        }
+    },
+    "VAELoader": {"input": {"required": {"vae_name": [["ace_1.5_vae.safetensors"]]}}},
     "LoadAudio": {"input": {"required": {"audio": [["input.wav"]]}}},
     "SaveAudio": {"input": {"required": {"audio": ["AUDIO"], "filename_prefix": ["STRING", {}]}}},
+    "SaveAudioAdvanced": {"input": {"required": {"audio": ["AUDIO"], "filename_prefix": ["STRING", {}]}}},
     "KSampler": {"input": {"required": {}}},
     "VAEDecodeAudio": {"input": {"required": {}}},
     "ModelSamplingAuraFlow": {"input": {"required": {}}},
