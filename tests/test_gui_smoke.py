@@ -156,7 +156,10 @@ class TestCaptionDisplay(GuiCase):
         self.gui._show_caption_plan({"mode": "none", "reason": "nothing installed"})
         self.assertIn("nothing installed", self.gui.caption_info._options["text"])
         self.gui._show_caption_plan({"mode": "native", "label": "MusicCaptionMerge"})
-        self.assertIn("MusicCaptionMerge", self.gui.caption_info._options["text"])
+        text = self.gui.caption_info._options["text"]
+        self.assertIn("MusicCaptionMerge", text)
+        self.assertNotIn("(native)", text)
+        self.assertIn("MOSS-Music", text)
 
     def test_captioner_list_arrives_from_the_worker(self):
         self.gui._post("captioners", (["auto", "off", "MusicCaptionAnalyze"], {"mode": "none", "reason": "x"}))
@@ -225,6 +228,37 @@ class TestGenerateWithCaptioner(GuiCase):
         saved = [name for name in os.listdir(self.dir) if "continue" in name]
         self.assertTrue(saved)
         self.assertIn("saved:", self.gui.log_text.get("1.0", "end"))
+
+    def test_analyse_source_button_populates_bpm_key_tags_and_lyrics(self):
+        self.state.caption_text = json.dumps(
+            {
+                "analyzer": "merge",
+                "bpm": 108,
+                "keyscale": "D minor",
+                "vocal_type": "male",
+                "instrumental": False,
+                "tags": "indie rock, crisp drums, 108 bpm, D minor, male lead vocals",
+                "detected_lyrics": "[Verse]\nWalking down the boulevard",
+                "measured": {"bpm": 108, "key": "D minor"},
+                "model": {"ok": True, "caption": "indie rock with crisp drums"},
+            }
+        )
+        self.gui.url_var.set(self.url)
+        self.gui.audio_var.set(self.audio)
+        self.gui.fill_lyrics_var.set(True)
+        self.gui.tags_text.delete("1.0", "end")
+        self.gui.tags_text.insert("1.0", "same room reverb")
+        self.gui.lyrics_text.delete("1.0", "end")
+
+        self.gui.on_caption_now()
+        self.gui.worker.join(timeout=5)
+        self.gui._drain_queue()
+
+        self.assertEqual(self.gui.bpm_var.get(), "108")
+        self.assertEqual(self.gui.key_var.get(), "D minor")
+        self.assertIn("same room reverb", self.gui.tags_text.get("1.0", "end"))
+        self.assertIn("indie rock", self.gui.tags_text.get("1.0", "end"))
+        self.assertIn("Walking down the boulevard", self.gui.lyrics_text.get("1.0", "end"))
 
     def test_without_the_captioner_checkbox_nothing_is_captioned(self):
         settings = self._settings(auto_caption=False)

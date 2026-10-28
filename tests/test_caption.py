@@ -170,15 +170,34 @@ class TestBuildCaptionPrompt(unittest.TestCase):
         self.assertEqual(prompt["2"]["inputs"]["audio"], ["1", 0])
         self.assertEqual(prompt["3"]["class_type"], "MusicCaptionMOSS")
         self.assertEqual(prompt["3"]["inputs"]["server_url"], "http://moss:30000")
+        self.assertEqual(prompt["3"]["inputs"]["moss_model"], ["5", 0])
+        self.assertEqual(prompt["5"]["class_type"], "MusicCaptionMOSSLoader")
+        self.assertEqual(prompt["5"]["inputs"]["when_missing"], "skip (DSP only)")
+        self.assertEqual(prompt["5"]["inputs"]["server_url"], "http://moss:30000")
         self.assertEqual(prompt["4"]["class_type"], "MusicCaptionMerge")
         self.assertEqual(prompt["4"]["inputs"]["analysis_json"], ["2", 8])
         self.assertEqual(prompt["4"]["inputs"]["moss_json"], ["3", 7])
+        self.assertEqual(prompt["4"]["inputs"]["lyrics"], ["3", 1])
         self.assertEqual(meta["read_node"], "4")
         # every link has to point at a node that exists
         for node in prompt.values():
             for value in node["inputs"].values():
                 if isinstance(value, list) and len(value) == 2:
                     self.assertIn(value[0], prompt)
+
+    def test_moss_weights_status_reads_loader_tooltip(self):
+        not_installed = app.moss_weights_status(self.info)
+        self.assertTrue(not_installed["loader_present"])
+        self.assertFalse(not_installed["installed"])
+
+        import copy
+        installed_info = copy.deepcopy(self.info)
+        installed_info["MusicCaptionMOSSLoader"]["input"]["required"]["model_name"][1]["tooltip"] = (
+            "Installed in models/moss_music: MOSS-Music-8B-Instruct."
+        )
+        installed = app.moss_weights_status(installed_info)
+        self.assertTrue(installed["installed"])
+        self.assertEqual(installed["models"], ["MOSS-Music-8B-Instruct"])
 
     def test_analyze_only_pack(self):
         info = info_without("MusicCaptionMOSS")

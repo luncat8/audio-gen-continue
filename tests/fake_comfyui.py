@@ -34,8 +34,22 @@ NODES = {
     },
     "VAELoader": {"input": {"required": {"vae_name": [["ace_1.5_vae.safetensors"]]}}},
     "LoadAudio": {"input": {"required": {"audio": [["input.wav"]]}}},
-    "SaveAudio": {"input": {"required": {"audio": ["AUDIO"], "filename_prefix": ["STRING", {}]}}},
-    "SaveAudioAdvanced": {"input": {"required": {"audio": ["AUDIO"], "filename_prefix": ["STRING", {}]}}},
+    "SaveAudio": {
+        "input": {"required": {"audio": ["AUDIO"], "filename_prefix": ["STRING", {}]}},
+        "output_node": True,
+    },
+    "SaveAudioAdvanced": {
+        "input": {"required": {"audio": ["AUDIO"], "filename_prefix": ["STRING", {}]}},
+        "output_node": True,
+    },
+    "PreviewAny": {
+        "input": {"required": {"source": ["*", {}]}},
+        "output": [],
+        "output_name": [],
+        "display_name": "Preview as Text",
+        "category": "utils",
+        "output_node": True,
+    },
     "KSampler": {"input": {"required": {}}},
     "VAEDecodeAudio": {"input": {"required": {}}},
     "ModelSamplingAuraFlow": {"input": {"required": {}}},
@@ -44,6 +58,37 @@ NODES = {
     "AudioContinueExtend": {"input": {"required": {}}},
     "AudioContinueStitch": {"input": {"required": {}}},
     # --- comfyui_music_caption (this repo) -------------------------------------------
+    "MusicCaptionMOSSLoader": {
+        "input": {
+            "required": {
+                "model_name": [
+                    ["MOSS-Music-8B-Instruct", "MOSS-Music-8B-Thinking", "disabled (DSP only)"],
+                    {
+                        "default": "MOSS-Music-8B-Instruct",
+                        "tooltip": (
+                            "No local MOSS-Music weights found yet in ComfyUI/models/moss_music/. "
+                            "Download https://huggingface.co/OpenMOSS-Team/MOSS-Music-8B-Instruct "
+                            "into ComfyUI/models/moss_music/MOSS-Music-8B-Instruct (or tick auto_download)."
+                        ),
+                    },
+                ],
+                "backend": [["auto", "transformers", "sglang_server", "disabled"], {"default": "auto"}],
+            },
+            "optional": {
+                "device": [["auto", "cuda", "cpu"], {"default": "auto"}],
+                "dtype": [["auto", "bfloat16", "float16", "float32"], {"default": "auto"}],
+                "keep_loaded": ["BOOLEAN", {"default": False}],
+                "auto_download": ["BOOLEAN", {"default": False}],
+                "when_missing": [["skip (DSP only)", "error"], {"default": "skip (DSP only)"}],
+                "server_url": ["STRING", {"default": "http://127.0.0.1:30000"}],
+            },
+        },
+        "output": ["MOSS_MODEL", "STRING"],
+        "output_name": ["moss_model", "status"],
+        "display_name": "MOSS-Music Loader",
+        "description": "Load local HuggingFace MOSS-Music 8B weights from ComfyUI/models/moss_music/.",
+        "category": "audio/caption",
+    },
     "MusicCaptionAnalyze": {
         "input": {
             "required": {"audio": ["AUDIO"], "max_seconds": ["FLOAT", {"default": 90.0}]},
@@ -58,6 +103,7 @@ NODES = {
         "display_name": "Music Caption (measure: bpm / key / vocals)",
         "description": "Measure bpm, key and vocals with numpy DSP.",
         "category": "audio/caption",
+        "output_node": True,
     },
     "MusicCaptionMOSS": {
         "input": {
@@ -67,6 +113,7 @@ NODES = {
                 "mode": [["attributes", "caption", "vocal", "lyrics", "key_bpm", "auto"], {}],
             },
             "optional": {
+                "moss_model": ["MOSS_MODEL"],
                 "model": ["STRING", {"default": "default"}],
                 "transport": [["path", "base64"], {"default": "path"}],
                 "segment": [["tail", "head", "full"], {"default": "tail"}],
@@ -77,8 +124,9 @@ NODES = {
         "output_name": ["caption", "lyrics", "vocal", "bpm", "keyscale", "instrumental",
                         "structure", "moss_json"],
         "display_name": "Music Caption (MOSS-Music)",
-        "description": "MOSS-Music 8B captioning over an SGLang server.",
+        "description": "MOSS-Music 8B captioning via MOSS-Music Loader or SGLang server.",
         "category": "audio/caption",
+        "output_node": True,
     },
     "MusicCaptionMerge": {
         "input": {
@@ -99,6 +147,24 @@ NODES = {
         "display_name": "Music Caption (build prompt)",
         "description": "Merge DSP and MOSS findings into one prompt.",
         "category": "audio/caption",
+        "output_node": True,
+    },
+    "MusicCaptionView": {
+        "input": {
+            "required": {},
+            "optional": {
+                "summary_json": ["STRING", {"default": "", "forceInput": True}],
+                "analysis_json": ["STRING", {"default": "", "forceInput": True}],
+                "moss_json": ["STRING", {"default": "", "forceInput": True}],
+                "include_sections": ["BOOLEAN", {"default": True}],
+            },
+        },
+        "output": ["STRING", "STRING", "STRING", "STRING", "INT", "STRING", "STRING", "STRING", "STRING"],
+        "output_name": ["report", "tags", "caption", "lyrics", "bpm", "keyscale", "vocal_type", "chords", "structure"],
+        "display_name": "Music Caption Viewer",
+        "description": "Display all measured and MOSS-Music caption fields inside ComfyUI.",
+        "category": "audio/caption",
+        "output_node": True,
     },
     "MusicCaptionTap": {
         "input": {
@@ -231,7 +297,8 @@ def make_handler(state):
                         class_type = node.get("class_type", "")
                         if class_type in (
                             "MusicCaptionAnalyze", "MusicCaptionMOSS",
-                            "MusicCaptionMerge", "MusicCaptionTap",
+                            "MusicCaptionMerge", "MusicCaptionView",
+                            "MusicCaptionTap", "PreviewAny",
                         ):
                             outputs[node_id] = {"text": [state.caption_text]}
                         if class_type.startswith("SaveAudio"):
@@ -278,6 +345,26 @@ def make_handler(state):
                         {
                             "error": {"type": "prompt_outputs_failed_validation"},
                             "node_errors": {"4": {"errors": ["bad add_seconds"]}},
+                        },
+                        status=400,
+                    )
+                    return
+                has_output = any(
+                    NODES.get((node or {}).get("class_type", ""), {}).get("output_node") is True
+                    and (node or {}).get("class_type", "") not in state.missing_nodes
+                    for node in prompt.values()
+                    if isinstance(node, dict)
+                )
+                if not has_output:
+                    self._send(
+                        {
+                            "error": {
+                                "type": "prompt_no_outputs",
+                                "message": "Prompt has no outputs",
+                                "details": "",
+                                "extra_info": {},
+                            },
+                            "node_errors": {},
                         },
                         status=400,
                     )

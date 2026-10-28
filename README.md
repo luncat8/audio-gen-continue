@@ -4,8 +4,9 @@ TLDR: it works somehow but quality and continuation is not acceptable, need to t
 
 The captioner TODO is done: a prompt file next to the track can be appended with one
 checkbox, and the source is analysed for **BPM, key and vocal type** — measured with DSP
-(always) and described by **MOSS-Music 8B** (if you run its server). See
-[CAPTIONER.md](CAPTIONER.md) for the investigation behind that choice.
+(always) and described by **MOSS-Music 8B** (loaded directly inside ComfyUI via
+`MOSS-Music Loader` from `ComfyUI/models/moss_music/`, or via an optional SGLang server).
+See [CAPTIONER.md](CAPTIONER.md) for the investigation behind that choice.
 
 Continue an existing music file with ComfyUI. Pick a track, say how many seconds to add,
 press **Generate** — you get `yourtrack_continue+30s_20261027-183000.flac` with your
@@ -36,6 +37,8 @@ Two model layouts are supported; the workflow decides which one is used:
 | Workflow | Model files | Steps / CFG |
 | --- | --- | --- |
 | `workflows/ace15xl_audio_continue_api.json` (**default**) | `diffusion_models/acestep_v1.5_xl_sft_bf16` + `text_encoders/qwen_0.6b_ace15` + `qwen_4b_ace15` + `vae/ace_1.5_vae` | 50 / 7.0 |
+| `workflows/ace15xl_audio_continue_caption_ui.json` (caption + continue) | XL SFT above + optional `moss_music/MOSS-Music-8B-Instruct` | 50 / 7.0 |
+| `workflows/music_caption_ui.json` (standalone captioner & viewer) | DSP built-in + optional `moss_music/MOSS-Music-8B-Instruct` | — |
 | `workflows/archive/ace15_audio_continue_turbo_aio_api.json` (archived) | `checkpoints/ace_step_1.5_turbo_aio` | 8 / 1.0 |
 
 The archived workflow is the previous 2B turbo AIO setup. It still works (same nodes, same
@@ -68,11 +71,12 @@ cp -r comfyui_music_caption   /path/to/ComfyUI/custom_nodes/
 Restart ComfyUI, then in the node search you should find
 
 * `audio/continue` — `Audio Continue (extend latent)`, `Audio Continue (stitch result)`
-* `audio/caption` — `Music Caption (measure: bpm / key / vocals)`, `Music Caption (MOSS-Music)`,
-  `Music Caption (build prompt)`, `Music Caption (collect text)`
+* `audio/caption` — `MOSS-Music Loader`, `Music Caption (measure: bpm / key / vocals)`,
+  `Music Caption (MOSS-Music)`, `Music Caption (build prompt)`, `Music Caption Viewer`,
+  `Music Caption (collect text)`
 
-They only use `torch` + `comfy.audio.resample` + `numpy`, i.e. what ComfyUI already ships.
-The captioner pack is optional but recommended (§4).
+They only use `torch` + `comfy.audio.resample` + `numpy` + `transformers`, i.e. what
+ComfyUI already ships. The captioner pack is optional but recommended (§4).
 
 ## 3. Download the model (XL SFT, 4 files ≈ 20 GB)
 
@@ -140,16 +144,24 @@ track and fills **BPM**, **Key** and the description, printing the vocal type in
 | What | How | Needs |
 | --- | --- | --- |
 | BPM, key + confidence, vocal presence + register, loudness, sections | `MusicCaptionAnalyze` — numpy DSP, measured not guessed | nothing |
-| genre/mood/instrumentation caption, vocal description, structure, lyrics, chords | `MusicCaptionMOSS` — MOSS-Music 8B (Apache-2.0) | `sglang serve --model-path MOSS-Music-8B-Instruct --trust-remote-code` on :30000 |
-| merged tags / lyrics / bpm / keyscale | `MusicCaptionMerge` | the two above |
+| genre/mood/instrumentation caption, vocal description, structure, lyrics, chords | `MusicCaptionMOSSLoader` + `MusicCaptionMOSS` — MOSS-Music 8B (Apache-2.0) | `ComfyUI/models/moss_music/MOSS-Music-8B-Instruct` from <https://huggingface.co/OpenMOSS-Team/MOSS-Music-8B-Instruct> (or optional SGLang URL) |
+| merged tags / lyrics / bpm / keyscale + on-canvas full report | `MusicCaptionMerge` + `MusicCaptionView` | the nodes above |
 
-Without a MOSS server everything still works on the DSP numbers alone; the captioner never
-blocks a render (a failure is logged and generation continues). Third-party captioners
-(SongScribe's *Song Analyzer*, ACE-Step's *Get Music Infos*, …) are detected through their
-`/object_info` and used through `MusicCaptionTap` — see [CAPTIONER.md](CAPTIONER.md) for the
-comparison, the MOSS-Music install, the node reference and the honest limits (a plucked
-synth arpeggio and a syllabic vocal line look alike to a heuristic; the 8B model knows the
-difference).
+To install the optional MOSS-Music 8B weights into ComfyUI (no external server needed):
+
+```bash
+hf download OpenMOSS-Team/MOSS-Music-8B-Instruct \
+  --local-dir /path/to/ComfyUI/models/moss_music/MOSS-Music-8B-Instruct
+```
+
+Without MOSS-Music weights downloaded yet, everything still works out of the box on DSP
+measurements alone (`when_missing = skip (DSP only)`); the captioner never blocks a render.
+Drag `workflows/music_caption_ui.json` (standalone analyzer + full report viewer) or
+`workflows/ace15xl_audio_continue_caption_ui.json` (caption + continue) into ComfyUI — both
+include an on-canvas `MarkdownNote` with the HuggingFace download links and folder paths.
+Third-party captioners (SongScribe's *Song Analyzer*, ACE-Step's *Get Music Infos*, …) are
+also detected through `/object_info` and used through `MusicCaptionTap` — see
+[CAPTIONER.md](CAPTIONER.md).
 
 ## 5. Run the GUI
 
@@ -233,16 +245,18 @@ tags, and applies the same normalisation the GUI does.
 ## 8. Files
 
 ```
-audio_continue_tk.py                            the Tk app (GUI + --check / --dry-run)
-comfyui_audio_continue/                         ComfyUI custom node pack (extend + stitch)
-comfyui_music_caption/                          ComfyUI captioner pack (DSP + MOSS-Music + merge)
-workflows/ace15xl_audio_continue_ui.json        default: XL SFT, drag & drop into ComfyUI
-workflows/ace15xl_audio_continue_api.json       default: what the app posts to /prompt
+audio_continue_tk.py                                    the Tk app (GUI + --check / --caption / --dry-run)
+comfyui_audio_continue/                                 ComfyUI custom node pack (extend + stitch)
+comfyui_music_caption/                                  ComfyUI captioner pack (MOSS-Music Loader + DSP + merge + viewer)
+workflows/music_caption_{ui,api}.json                   standalone ComfyUI captioner, viewer & HF download note
+workflows/ace15xl_audio_continue_caption_{ui,api}.json  XL SFT continuation + captioner + viewer & HF note
+workflows/ace15xl_audio_continue_ui.json                default: XL SFT, drag & drop into ComfyUI
+workflows/ace15xl_audio_continue_api.json               default: what the app posts to /prompt
 workflows/archive/ace15_audio_continue_turbo_aio_{ui,api}.json   archived 2B turbo AIO pair
-tools/build_workflows.py                        generates all four workflow files
-tests/                                          headless tests (fake ComfyUI + fake tkinter + torch stub)
-RESEARCH.md                                     model/workflow investigation, sources, caveats
-CAPTIONER.md                                    captioner investigation: key / BPM / vocal type
+tools/build_workflows.py                                generates all eight workflow files
+tests/                                                  headless tests (fake ComfyUI + fake tkinter + torch stub)
+RESEARCH.md                                             model/workflow investigation, sources, caveats
+CAPTIONER.md                                            captioner investigation: key / BPM / vocal type
 ```
 
 ## 9. Troubleshooting
@@ -262,7 +276,8 @@ CAPTIONER.md                                    captioner investigation: key / B
 | `Analyse source` says *no captioner node* | Copy `comfyui_music_caption/` into `ComfyUI/custom_nodes/` and restart ComfyUI (`--check` lists what it found). Third-party captioners also need `MusicCaptionTap` from that pack. |
 | Captioner runs but BPM/key stay empty | Only a free-text caption came back (that is what MOSS's `caption` mode does). Use `mode = attributes` / `auto`, or set the fields by hand. |
 | Caption says "vocals: uncertain" | The DSP heuristic cannot separate a plucked synth line from singing — install/launch MOSS-Music (§4) or type the vocal type into the description. |
-| `no MOSS-Music server at ...` | Start it: `sglang serve --model-path MOSS-Music-8B-Instruct --trust-remote-code` (port 30000), and put that URL into **MOSS-Music server**. Generation works without it. |
+| `prompt_no_outputs` when clicking `Analyse source` | Fixed in `comfyui_music_caption` (`OUTPUT_NODE = True` on all caption/viewer nodes) — copy the updated `comfyui_music_caption/` into `ComfyUI/custom_nodes/` and restart ComfyUI. |
+| `MOSS-Music model is not downloaded yet` / `no MOSS-Music server at ...` | Download <https://huggingface.co/OpenMOSS-Team/MOSS-Music-8B-Instruct> into `ComfyUI/models/moss_music/MOSS-Music-8B-Instruct` (or run an optional SGLang server on `:30000`). DSP BPM/key/vocals and audio generation work without it. |
 | Result is FLAC and large | `SaveAudioAdvanced` writes FLAC in the shipped workflows; change its `format` widget to `mp3` (or swap in `SaveAudio`) and keep `filename_prefix` — the app picks up any audio in the history output. |
 
 ## 10. Other models / packs

@@ -123,10 +123,13 @@ PROMPT_JSON_KEYS = (
 # captioner nodes shipped by this repo, best first (see CAPTIONER.md)
 CAPTIONER_PREFERENCE = ("MusicCaptionMerge", "MusicCaptionAnalyze", "MusicCaptionMOSS")
 CAPTIONER_TAP = "MusicCaptionTap"
+CAPTIONER_LOADER = "MusicCaptionMOSSLoader"
+CAPTIONER_HELPERS = (CAPTIONER_TAP, CAPTIONER_LOADER, "MusicCaptionView")
 # any third-party node whose name/display name/category mentions one of these and
 # that takes an AUDIO input and returns STRINGs is offered as a captioner
 CAPTIONER_HINTS = ("caption", "scribe", "analy", "music info", "music_info", "describe", "tagger")
 MOSS_DEFAULT_URL = "http://127.0.0.1:30000"
+MOSS_HF_URL = "https://huggingface.co/OpenMOSS-Team/MOSS-Music-8B-Instruct"
 
 DEFAULT_TAGS = (
     "instrumental, continues the existing song, same tempo, same key, same instruments, "
@@ -386,7 +389,9 @@ def find_audio_outputs(history_entry):
 
 
 def _set(inputs, key, value):
-    if key in inputs:
+    # Leave graph links (`["node_id", slot]`) intact when a workflow wires a captioner
+    # straight into the text encoder (e.g. ace15xl_audio_continue_caption_api.json).
+    if key in inputs and not isinstance(inputs[key], list):
         inputs[key] = value
         return True
     return False
@@ -430,6 +435,16 @@ def patch_workflow(workflow, settings, uploaded_name=None):
             _set(inputs, "seed", int(settings.seed))
             _set(inputs, "generate_audio_codes", bool(settings.generate_audio_codes))
             touched.add("text")
+
+        elif ctype == "MusicCaptionMOSSLoader":
+            _set(inputs, "server_url", settings.captioner_url)
+
+        elif ctype == "MusicCaptionMOSS":
+            _set(inputs, "server_url", settings.captioner_url)
+
+        elif ctype == "MusicCaptionMerge":
+            _set(inputs, "extra_tags", settings.tags)
+            _set(inputs, "keep_lyrics", bool(settings.caption_fill_lyrics))
 
         elif ctype in ("KSampler", "KSamplerAdvanced"):
             _set(inputs, "seed", int(settings.seed))
@@ -669,7 +684,7 @@ def captioner_candidates(object_info):
     """Third-party captioner nodes present on the server, best guess first."""
     found = []
     for name, entry in (object_info or {}).items():
-        if name in CAPTIONER_PREFERENCE or name == CAPTIONER_TAP:
+        if name in CAPTIONER_PREFERENCE or name in CAPTIONER_HELPERS:
             continue
         specs = _node_specs(entry)
         if not any(_spec_type(spec) == "AUDIO" for spec in specs.values()):
@@ -697,17 +712,49 @@ def captioner_candidates(object_info):
     return found
 
 
+def moss_weights_status(object_info):
+    """Inspect MusicCaptionMOSSLoader's object_info metadata to see if MOSS weights are installed."""
+    entry = (object_info or {}).get(CAPTIONER_LOADER)
+    if not entry:
+        return {
+            "loader_present": False,
+            "installed": False,
+            "models": [],
+            "summary": "MOSS-Music Loader not installed yet (DSP BPM/key/vocals + optional SGLang URL)",
+        }
+    specs = _node_specs(entry)
+    model_spec = specs.get("model_name") or ()
+    options = model_spec[1] if len(model_spec) > 1 and isinstance(model_spec[1], dict) else {}
+    tooltip = str(options.get("tooltip") or "")
+    if tooltip.startswith("Installed in models/moss_music:"):
+        raw = tooltip.split(":", 1)[1].strip().rstrip(".")
+        models = [m.strip() for m in raw.split(",") if m.strip()]
+        return {
+            "loader_present": True,
+            "installed": True,
+            "models": models,
+            "summary": f"local MOSS-Music weights ready ({', '.join(models)})",
+        }
+    return {
+        "loader_present": True,
+        "installed": False,
+        "models": [],
+        "summary": "DSP BPM/key/vocals ready; MOSS-Music 8B weights not downloaded yet (optional)",
+    }
+
+
 def captioner_plan(object_info, requested="auto"):
     """Decide how to caption: {'mode': native|tap|none, 'class', 'label', 'reason'}."""
     object_info = object_info or {}
     ours = [name for name in CAPTIONER_PREFERENCE if name in object_info]
+    moss = moss_weights_status(object_info)
     if requested in ("off", "none", "disabled"):
         return {"mode": "none", "class": "", "label": "", "reason": "captioner disabled"}
     if requested and requested not in ("auto", "", None):
         if requested in object_info:
             if requested in CAPTIONER_PREFERENCE:
                 return {"mode": "native", "class": requested, "label": requested,
-                        "reason": "selected captioner"}
+                        "reason": "selected captioner", "moss": moss}
             if CAPTIONER_TAP in object_info:
                 return {"mode": "tap", "class": requested, "label": requested,
                         "reason": "selected captioner + MusicCaptionTap"}
@@ -718,7 +765,7 @@ def captioner_plan(object_info, requested="auto"):
 
     if ours:
         return {"mode": "native", "class": ours[0], "label": ours[0],
-                "reason": "comfyui_music_caption found"}
+                "reason": "comfyui_music_caption installed", "moss": moss}
     third_party = captioner_candidates(object_info)
     if third_party:
         if CAPTIONER_TAP in object_info:
@@ -813,22 +860,40 @@ def build_caption_prompt(object_info, plan, uploaded_name, moss_url=MOSS_DEFAULT
                 ),
             }
         if use_moss:
+            moss_links = {"audio": ["1", 0]}
+            if CAPTIONER_LOADER in object_info:
+                prompt["5"] = {
+                    "class_type": CAPTIONER_LOADER,
+                    "inputs": _fill_inputs(
+                        object_info[CAPTIONER_LOADER],
+                        overrides={
+                            "backend": "auto",
+                            "when_missing": "skip (DSP only)",
+                            "keep_loaded": False,
+                            "server_url": moss_url,
+                        },
+                    ),
+                }
+                moss_links["moss_model"] = ["5", 0]
             prompt["3"] = {
                 "class_type": "MusicCaptionMOSS",
                 "inputs": _fill_inputs(
                     object_info["MusicCaptionMOSS"],
                     overrides={"server_url": moss_url, "mode": moss_mode,
                                "max_seconds": float(max_seconds)},
-                    links={"audio": ["1", 0]},
+                    links=moss_links,
                 ),
             }
         if "2" in prompt and "3" in prompt and "MusicCaptionMerge" in object_info:
+            merge_links = {"analysis_json": ["2", 8], "moss_json": ["3", 7]}
+            if "lyrics" in _node_specs(object_info["MusicCaptionMerge"]):
+                merge_links["lyrics"] = ["3", 1]
             prompt["4"] = {
                 "class_type": "MusicCaptionMerge",
                 "inputs": _fill_inputs(
                     object_info["MusicCaptionMerge"],
                     overrides={"prefer_numeric": prefer_numeric},
-                    links={"analysis_json": ["2", 8], "moss_json": ["3", 7]},
+                    links=merge_links,
                 ),
             }
             meta["read_node"] = "4"
@@ -880,10 +945,13 @@ def build_caption_prompt(object_info, plan, uploaded_name, moss_url=MOSS_DEFAULT
 def describe_captioners(object_info, plan=None):
     """Human-readable lines about the captioners the server offers."""
     ours = [name for name in CAPTIONER_PREFERENCE if name in (object_info or {})]
+    moss = moss_weights_status(object_info)
     third_party = captioner_candidates(object_info)
     lines = []
     if ours:
-        lines.append("captioner: comfyui_music_caption installed (" + ", ".join(ours) + ")")
+        extras = [name for name in (CAPTIONER_LOADER, "MusicCaptionView") if name in (object_info or {})]
+        installed = ", ".join(ours + extras)
+        lines.append("captioner: comfyui_music_caption installed (" + installed + ")")
     else:
         lines.append("captioner: comfyui_music_caption is NOT installed "
                      "(copy comfyui_music_caption/ into ComfyUI/custom_nodes/ and restart)")
@@ -893,11 +961,18 @@ def describe_captioners(object_info, plan=None):
     if plan:
         if plan.get("mode") == "none":
             lines.append("  -> captioning off: " + plan.get("reason", ""))
+        elif plan.get("mode") == "native":
+            lines.append(f"  -> will caption with {plan.get('class')} ({moss['summary']})")
         else:
-            lines.append(f"  -> will caption with {plan.get('class')} ({plan.get('mode')})")
+            lines.append(f"  -> will caption with {plan.get('class')} ({plan.get('reason') or plan.get('mode')})")
     if ours and "MusicCaptionMOSS" in ours:
-        lines.append(f"  MOSS-Music server (optional, better captions): {MOSS_DEFAULT_URL} "
-                     "- `sglang serve --model-path MOSS-Music-8B-Instruct --trust-remote-code`")
+        if moss["installed"]:
+            lines.append("  MOSS-Music 8B: " + moss["summary"])
+        else:
+            lines.append(
+                f"  MOSS-Music 8B (optional rich captions/chords/lyrics): download {MOSS_HF_URL} "
+                f"into ComfyUI/models/moss_music/MOSS-Music-8B-Instruct (or point MOSS URL at {MOSS_DEFAULT_URL})"
+            )
     return lines
 
 
@@ -913,7 +988,8 @@ def interpret_caption_payload(payload):
     result = {
         "caption": "", "tags": "", "bpm": 0, "keyscale": "", "lyrics": "",
         "vocal_type": "", "vocal_presence": "", "instrumental": None,
-        "structure": "", "notes": [], "raw": payload,
+        "structure": "", "chords": "", "moss_ok": None, "moss_error": "",
+        "notes": [], "raw": payload,
     }
     if isinstance(payload, str):
         payload = {"caption": payload}
@@ -954,7 +1030,9 @@ def interpret_caption_payload(payload):
     if not keyscale and measured:
         keyscale = normalize_keyscale(measured.get("key"))
 
-    lyrics = pick("lyrics", "lyric") or ""
+    lyrics = pick("lyrics", "detected_lyrics", "lyric") or ""
+    if not lyrics and model:
+        lyrics = model.get("lyrics") or ""
     vocal_type = pick("vocal_type", "voice", "vocal_details") or ""
     if not vocal_type and model:
         vocal_type = model.get("vocal_type") or ""
@@ -973,6 +1051,9 @@ def interpret_caption_payload(payload):
     if instrumental is None and str(presence).lower() in ("instrumental", "vocals", "uncertain"):
         instrumental = str(presence).lower() == "instrumental"
 
+    moss_ok = model.get("ok") if "ok" in model else payload.get("ok")
+    moss_error = str(model.get("error") or payload.get("error") or "").strip()
+
     result.update(
         caption=str(caption).strip(),
         tags=str(tags).strip(),
@@ -983,6 +1064,9 @@ def interpret_caption_payload(payload):
         vocal_presence=str(presence).strip(),
         instrumental=instrumental,
         structure=str(pick("structure") or (model.get("structure") or "")).strip(),
+        chords=str(pick("chords") or (model.get("chords") or "")).strip(),
+        moss_ok=bool(moss_ok) if moss_ok is not None else None,
+        moss_error=moss_error,
     )
     for key in ("analysis_json", "moss_json", "summary_json"):
         if isinstance(payload.get(key), str):
@@ -998,6 +1082,8 @@ def interpret_caption_payload(payload):
         result["notes"].append(f"vocals: {result['vocal_type']}")
     elif result["instrumental"]:
         result["notes"].append("instrumental")
+    if result["chords"]:
+        result["notes"].append(f"chords: {result['chords']}")
     return result
 
 
@@ -1492,7 +1578,7 @@ class App:
         ttk.Checkbutton(
             box, text="fill empty lyrics from it", variable=self.fill_lyrics_var
         ).grid(row=3, column=2, columnspan=2, sticky="w", **pad)
-        ttk.Label(box, text="MOSS-Music server").grid(row=4, column=0, sticky="w", **pad)
+        ttk.Label(box, text="MOSS URL (opt.)").grid(row=4, column=0, sticky="w", **pad)
         self.captioner_url_var = tk.StringVar(value=MOSS_DEFAULT_URL)
         ttk.Entry(box, textvariable=self.captioner_url_var).grid(
             row=4, column=1, columnspan=3, sticky="ew", **pad
@@ -1764,12 +1850,13 @@ class App:
                 self._log("captioner: " + (plan.get("reason") or "disabled"))
                 self._status("no captioner")
                 return
-            self._log(f"captioner: {plan['label']} ({plan['mode']}, {plan['reason']})")
+            moss_info = (plan.get("moss") or {}).get("summary") or plan.get("reason") or plan["mode"]
+            self._log(f"captioner: {plan['label']} ({moss_info})")
             self._log("uploading " + os.path.basename(settings.audio_file))
             uploaded = client.upload_audio(settings.audio_file)
             result = self._caption_run(client, settings, uploaded, info, plan)
             if result:
-                self._apply_caption_result(result, settings)
+                self._apply_caption_result(result, settings, apply_fields=True)
 
         self._start(job, "captioning")
 
@@ -1792,11 +1879,11 @@ class App:
             return None
         return result
 
-    def _apply_caption_result(self, result, settings):
+    def _apply_caption_result(self, result, settings, apply_fields=False):
         changes = merge_caption_into_settings(
             settings, result, fill_lyrics=bool(settings.caption_fill_lyrics)
         )
-        self._post("caption", (result, changes))
+        self._post("caption", (result, changes, apply_fields))
         notes = ", ".join(result.get("notes") or [])
         self._log("caption: " + (notes or "(only free text, no bpm/key/vocals)"))
         for change in changes:
@@ -1804,6 +1891,11 @@ class App:
         caption_tags = caption_tags_from_result(result)
         if caption_tags:
             self._log("  tags from captioner: " + caption_tags[:300])
+        if result.get("moss_ok") is False:
+            self._log(
+                f"  note: DSP BPM/key/vocals ran; MOSS-Music 8B was skipped "
+                f"(optional download -> ComfyUI/models/moss_music/: {MOSS_HF_URL})"
+            )
 
     def on_check(self):
         settings = self._collect_settings()
@@ -1936,12 +2028,24 @@ class App:
     def _post(self, kind, value):
         self.queue.append((kind, value))
 
-    def _show_caption(self, result, changes):
-        """Put a caption result on screen (bpm / key fields + one info line)."""
+    def _show_caption(self, result, changes, apply_fields=False):
+        """Put a caption result on screen (bpm / key fields + tags/lyrics when requested)."""
         if result.get("bpm"):
             self.bpm_var.set(str(int(result["bpm"])))
         if result.get("keyscale"):
             self.key_var.set(result["keyscale"])
+        if apply_fields:
+            caption_tags = caption_tags_from_result(result)
+            if caption_tags:
+                current_tags = self.tags_text.get("1.0", "end").strip()
+                merged_tags = merge_prompt_text(current_tags, caption_tags, append=True)
+                self.tags_text.delete("1.0", "end")
+                self.tags_text.insert("1.0", merged_tags)
+            if self.fill_lyrics_var.get() and result.get("lyrics"):
+                current_lyrics = self.lyrics_text.get("1.0", "end").strip()
+                if not current_lyrics:
+                    self.lyrics_text.delete("1.0", "end")
+                    self.lyrics_text.insert("1.0", result["lyrics"])
         bits = list(result.get("notes") or [])
         if result.get("structure"):
             bits.append("structure: " + result["structure"])
@@ -1953,11 +2057,18 @@ class App:
     def _show_caption_plan(self, plan):
         if plan.get("mode") == "none":
             self.caption_info.configure(text=plan.get("reason", "no captioner"), foreground="#a00")
+            return
+        moss = plan.get("moss") or {}
+        if moss.get("installed"):
+            detail = "DSP + local MOSS-Music weights"
+        elif plan.get("mode") == "native":
+            detail = "DSP BPM/key/vocals ready; MOSS-Music 8B optional in models/moss_music/"
         else:
-            self.caption_info.configure(
-                text=f"{plan['label']} available ({plan['mode']}) - press Analyse source",
-                foreground="#264",
-            )
+            detail = plan.get("reason") or plan.get("mode", "")
+        self.caption_info.configure(
+            text=f"{plan['label']} ready ({detail}) - press Analyse source",
+            foreground="#264",
+        )
 
     # -- the actual job ----------------------------------------------------------
 

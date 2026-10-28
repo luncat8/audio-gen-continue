@@ -1,0 +1,311 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "acestep_v1.5_xl_sft_bf16.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "ACE-Step 1.5 XL SFT (diffusion model)"
+    }
+  },
+  "12": {
+    "class_type": "DualCLIPLoader",
+    "inputs": {
+      "clip_name1": "qwen_0.6b_ace15.safetensors",
+      "clip_name2": "qwen_4b_ace15.safetensors",
+      "type": "ace"
+    },
+    "_meta": {
+      "title": "Text encoders (Qwen 0.6B + 4B)"
+    }
+  },
+  "13": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "ace_1.5_vae.safetensors"
+    },
+    "_meta": {
+      "title": "ACE-Step 1.5 VAE"
+    }
+  },
+  "2": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+      "shift": 3.0,
+      "model": [
+        "1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Model sampling (shift 3)"
+    }
+  },
+  "14": {
+    "class_type": "MusicCaptionMOSSLoader",
+    "inputs": {
+      "model_name": "MOSS-Music-8B-Instruct",
+      "backend": "auto",
+      "device": "auto",
+      "dtype": "auto",
+      "keep_loaded": false,
+      "auto_download": false,
+      "when_missing": "skip (DSP only)",
+      "server_url": "http://127.0.0.1:30000"
+    },
+    "_meta": {
+      "title": "MOSS-Music Loader (optional 8B model)"
+    }
+  },
+  "15": {
+    "class_type": "MusicCaptionAnalyze",
+    "inputs": {
+      "max_seconds": 90.0,
+      "sections": true,
+      "extra_tags": "",
+      "audio": [
+        "3",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "DSP Measure (BPM / Key / Vocals)"
+    }
+  },
+  "16": {
+    "class_type": "MusicCaptionMOSS",
+    "inputs": {
+      "server_url": "http://127.0.0.1:30000",
+      "mode": "auto",
+      "model": "default",
+      "transport": "path",
+      "segment": "tail",
+      "max_seconds": 120.0,
+      "max_tokens": 1024,
+      "temperature": 0.0,
+      "timeout": 300.0,
+      "extra_tags": "",
+      "audio": [
+        "3",
+        0
+      ],
+      "moss_model": [
+        "14",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "MOSS-Music 8B Captioner"
+    }
+  },
+  "17": {
+    "class_type": "MusicCaptionMerge",
+    "inputs": {
+      "prefer_numeric": "dsp",
+      "extra_tags": "continues the existing song, same tempo, same key, same instruments, same mix and reverb, natural musical development, smooth transition, studio quality",
+      "keep_lyrics": false,
+      "analysis_json": [
+        "15",
+        8
+      ],
+      "moss_json": [
+        "16",
+        7
+      ],
+      "lyrics": [
+        "16",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "Build Continuation Prompt"
+    }
+  },
+  "18": {
+    "class_type": "MusicCaptionView",
+    "inputs": {
+      "include_sections": true,
+      "summary_json": [
+        "17",
+        6
+      ],
+      "analysis_json": [
+        "15",
+        8
+      ],
+      "moss_json": [
+        "16",
+        7
+      ]
+    },
+    "_meta": {
+      "title": "Music Caption Viewer"
+    }
+  },
+  "19": {
+    "class_type": "PreviewAny",
+    "inputs": {
+      "source": [
+        "18",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Analysis Report (BPM / Key / Vocals / Chords)"
+    }
+  },
+  "3": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "input.wav"
+    },
+    "_meta": {
+      "title": "Music file"
+    }
+  },
+  "4": {
+    "class_type": "AudioContinueExtend",
+    "inputs": {
+      "add_seconds": 30.0,
+      "mask_mode": "generate_new_only",
+      "repaint_seconds": 0.0,
+      "audio": [
+        "3",
+        0
+      ],
+      "vae": [
+        "13",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Add seconds"
+    }
+  },
+  "5": {
+    "class_type": "TextEncodeAceStepAudio1.5",
+    "inputs": {
+      "tags": [
+        "17",
+        0
+      ],
+      "lyrics": "",
+      "seed": 31,
+      "bpm": [
+        "18",
+        4
+      ],
+      "duration": [
+        "4",
+        3
+      ],
+      "timesignature": "4",
+      "language": "en",
+      "keyscale": "C major",
+      "generate_audio_codes": true,
+      "cfg_scale": 2.0,
+      "temperature": 0.85,
+      "top_p": 0.9,
+      "top_k": 0,
+      "min_p": 0.0,
+      "clip": [
+        "12",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Style + lyrics"
+    }
+  },
+  "6": {
+    "class_type": "ConditioningZeroOut",
+    "inputs": {
+      "conditioning": [
+        "5",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Negative (zero out)"
+    }
+  },
+  "7": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 31,
+      "steps": 50,
+      "cfg": 7.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "model": [
+        "2",
+        0
+      ],
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "6",
+        0
+      ],
+      "latent_image": [
+        "4",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Sampler"
+    }
+  },
+  "8": {
+    "class_type": "VAEDecodeAudio",
+    "inputs": {
+      "samples": [
+        "7",
+        0
+      ],
+      "vae": [
+        "13",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Decode"
+    }
+  },
+  "9": {
+    "class_type": "AudioContinueStitch",
+    "inputs": {
+      "crossfade_seconds": 1.0,
+      "output_sample_rate": "highest",
+      "source_audio": [
+        "3",
+        0
+      ],
+      "continued_audio": [
+        "8",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Stitch original + continuation"
+    }
+  },
+  "10": {
+    "class_type": "SaveAudioAdvanced",
+    "inputs": {
+      "filename_prefix": "audio-continue/audio",
+      "format": "flac",
+      "audio": [
+        "9",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Save"
+    }
+  }
+}

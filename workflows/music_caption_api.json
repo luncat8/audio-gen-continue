@@ -1,0 +1,148 @@
+{
+  "1": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "input.wav"
+    },
+    "_meta": {
+      "title": "1. Load Music File"
+    }
+  },
+  "2": {
+    "class_type": "MusicCaptionMOSSLoader",
+    "inputs": {
+      "model_name": "MOSS-Music-8B-Instruct",
+      "backend": "auto",
+      "device": "auto",
+      "dtype": "auto",
+      "keep_loaded": false,
+      "auto_download": false,
+      "when_missing": "skip (DSP only)",
+      "server_url": "http://127.0.0.1:30000"
+    },
+    "_meta": {
+      "title": "2. MOSS-Music Loader (optional 8B model)"
+    }
+  },
+  "3": {
+    "class_type": "MusicCaptionAnalyze",
+    "inputs": {
+      "max_seconds": 90.0,
+      "sections": true,
+      "extra_tags": "",
+      "audio": [
+        "1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "3a. DSP Measure (BPM / Key / Vocals — no model)"
+    }
+  },
+  "4": {
+    "class_type": "MusicCaptionMOSS",
+    "inputs": {
+      "server_url": "http://127.0.0.1:30000",
+      "mode": "auto",
+      "model": "default",
+      "transport": "path",
+      "segment": "tail",
+      "max_seconds": 120.0,
+      "max_tokens": 1024,
+      "temperature": 0.0,
+      "timeout": 300.0,
+      "extra_tags": "",
+      "audio": [
+        "1",
+        0
+      ],
+      "moss_model": [
+        "2",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "3b. MOSS-Music 8B (caption / vocals / chords / lyrics)"
+    }
+  },
+  "5": {
+    "class_type": "MusicCaptionMerge",
+    "inputs": {
+      "prefer_numeric": "dsp",
+      "extra_tags": "",
+      "keep_lyrics": false,
+      "analysis_json": [
+        "3",
+        8
+      ],
+      "moss_json": [
+        "4",
+        7
+      ],
+      "lyrics": [
+        "4",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "4. Build Prompt (merge DSP + MOSS)"
+    }
+  },
+  "6": {
+    "class_type": "MusicCaptionView",
+    "inputs": {
+      "include_sections": true,
+      "summary_json": [
+        "5",
+        6
+      ],
+      "analysis_json": [
+        "3",
+        8
+      ],
+      "moss_json": [
+        "4",
+        7
+      ]
+    },
+    "_meta": {
+      "title": "5. Music Caption Viewer (all fields)"
+    }
+  },
+  "7": {
+    "class_type": "PreviewAny",
+    "inputs": {
+      "source": [
+        "6",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "6a. Analysis Report (BPM / Key / Vocals / Chords / Sections)"
+    }
+  },
+  "9": {
+    "class_type": "PreviewAny",
+    "inputs": {
+      "source": [
+        "6",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "6b. Prompt / Tags (for ACE-Step / MiniMax)"
+    }
+  },
+  "10": {
+    "class_type": "PreviewAny",
+    "inputs": {
+      "source": [
+        "6",
+        3
+      ]
+    },
+    "_meta": {
+      "title": "6c. Lyrics (MOSS-Music ASR)"
+    }
+  }
+}

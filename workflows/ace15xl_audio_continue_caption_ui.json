@@ -1,0 +1,1268 @@
+{
+  "id": "785f1601-a259-5f14-97f7-fc487a709090",
+  "revision": 0,
+  "last_node_id": 19,
+  "last_link_id": 27,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "UNETLoader",
+      "pos": [
+        40,
+        120
+      ],
+      "size": [
+        420,
+        110
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            1
+          ],
+          "slot_index": 0
+        }
+      ],
+      "title": "ACE-Step 1.5 XL SFT (diffusion model)",
+      "properties": {
+        "Node name for S&R": "UNETLoader"
+      },
+      "widgets_values": [
+        "acestep_v1.5_xl_sft_bf16.safetensors",
+        "default"
+      ]
+    },
+    {
+      "id": 12,
+      "type": "DualCLIPLoader",
+      "pos": [
+        40,
+        260
+      ],
+      "size": [
+        420,
+        140
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            14
+          ],
+          "slot_index": 0
+        }
+      ],
+      "title": "Text encoders (Qwen 0.6B + 4B)",
+      "properties": {
+        "Node name for S&R": "DualCLIPLoader"
+      },
+      "widgets_values": [
+        "qwen_0.6b_ace15.safetensors",
+        "qwen_4b_ace15.safetensors",
+        "ace",
+        "default"
+      ]
+    },
+    {
+      "id": 13,
+      "type": "VAELoader",
+      "pos": [
+        40,
+        430
+      ],
+      "size": [
+        420,
+        80
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            13,
+            24
+          ],
+          "slot_index": 0
+        }
+      ],
+      "title": "ACE-Step 1.5 VAE",
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "ace_1.5_vae.safetensors"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "ModelSamplingAuraFlow",
+      "pos": [
+        500,
+        120
+      ],
+      "size": [
+        320,
+        90
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            19
+          ],
+          "slot_index": 0
+        }
+      ],
+      "title": "Model sampling (shift 3)",
+      "properties": {
+        "Node name for S&R": "ModelSamplingAuraFlow"
+      },
+      "widgets_values": [
+        3.0,
+        "flow"
+      ]
+    },
+    {
+      "id": 14,
+      "type": "MusicCaptionMOSSLoader",
+      "pos": [
+        40,
+        960
+      ],
+      "size": [
+        420,
+        260
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "moss_model",
+          "type": "MOSS_MODEL",
+          "links": [
+            4
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "status",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 1
+        }
+      ],
+      "title": "MOSS-Music Loader (optional 8B model)",
+      "properties": {
+        "Node name for S&R": "MusicCaptionMOSSLoader"
+      },
+      "widgets_values": [
+        "MOSS-Music-8B-Instruct",
+        "auto",
+        "auto",
+        "auto",
+        false,
+        false,
+        "skip (DSP only)",
+        "http://127.0.0.1:30000"
+      ]
+    },
+    {
+      "id": 15,
+      "type": "MusicCaptionAnalyze",
+      "pos": [
+        500,
+        900
+      ],
+      "size": [
+        400,
+        250
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "tags",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 0
+        },
+        {
+          "name": "bpm",
+          "type": "INT",
+          "links": null,
+          "slot_index": 1
+        },
+        {
+          "name": "keyscale",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 2
+        },
+        {
+          "name": "key_confidence",
+          "type": "FLOAT",
+          "links": null,
+          "slot_index": 3
+        },
+        {
+          "name": "bpm_confidence",
+          "type": "FLOAT",
+          "links": null,
+          "slot_index": 4
+        },
+        {
+          "name": "vocal_presence",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 5
+        },
+        {
+          "name": "vocal_type",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 6
+        },
+        {
+          "name": "duration_seconds",
+          "type": "FLOAT",
+          "links": null,
+          "slot_index": 7
+        },
+        {
+          "name": "analysis_json",
+          "type": "STRING",
+          "links": [
+            5,
+            9
+          ],
+          "slot_index": 8
+        }
+      ],
+      "title": "DSP Measure (BPM / Key / Vocals)",
+      "properties": {
+        "Node name for S&R": "MusicCaptionAnalyze"
+      },
+      "widgets_values": [
+        90.0,
+        true,
+        ""
+      ]
+    },
+    {
+      "id": 16,
+      "type": "MusicCaptionMOSS",
+      "pos": [
+        500,
+        1190
+      ],
+      "size": [
+        400,
+        330
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 3
+        },
+        {
+          "name": "moss_model",
+          "type": "MOSS_MODEL",
+          "link": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "caption",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 0
+        },
+        {
+          "name": "lyrics",
+          "type": "STRING",
+          "links": [
+            7
+          ],
+          "slot_index": 1
+        },
+        {
+          "name": "vocal",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 2
+        },
+        {
+          "name": "bpm",
+          "type": "INT",
+          "links": null,
+          "slot_index": 3
+        },
+        {
+          "name": "keyscale",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 4
+        },
+        {
+          "name": "instrumental",
+          "type": "BOOLEAN",
+          "links": null,
+          "slot_index": 5
+        },
+        {
+          "name": "structure",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 6
+        },
+        {
+          "name": "moss_json",
+          "type": "STRING",
+          "links": [
+            6,
+            10
+          ],
+          "slot_index": 7
+        }
+      ],
+      "title": "MOSS-Music 8B Captioner",
+      "properties": {
+        "Node name for S&R": "MusicCaptionMOSS"
+      },
+      "widgets_values": [
+        "http://127.0.0.1:30000",
+        "auto",
+        "default",
+        "path",
+        "tail",
+        120.0,
+        1024,
+        0.0,
+        300.0,
+        ""
+      ]
+    },
+    {
+      "id": 17,
+      "type": "MusicCaptionMerge",
+      "pos": [
+        940,
+        900
+      ],
+      "size": [
+        380,
+        240
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "analysis_json",
+          "type": "STRING",
+          "link": 5
+        },
+        {
+          "name": "moss_json",
+          "type": "STRING",
+          "link": 6
+        },
+        {
+          "name": "lyrics",
+          "type": "STRING",
+          "link": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "tags",
+          "type": "STRING",
+          "links": [
+            15
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "lyrics",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 1
+        },
+        {
+          "name": "bpm",
+          "type": "INT",
+          "links": null,
+          "slot_index": 2
+        },
+        {
+          "name": "keyscale",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 3
+        },
+        {
+          "name": "instrumental",
+          "type": "BOOLEAN",
+          "links": null,
+          "slot_index": 4
+        },
+        {
+          "name": "vocal_type",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 5
+        },
+        {
+          "name": "summary_json",
+          "type": "STRING",
+          "links": [
+            8
+          ],
+          "slot_index": 6
+        }
+      ],
+      "title": "Build Continuation Prompt",
+      "properties": {
+        "Node name for S&R": "MusicCaptionMerge"
+      },
+      "widgets_values": [
+        "dsp",
+        "continues the existing song, same tempo, same key, same instruments, same mix and reverb, natural musical development, smooth transition, studio quality",
+        false
+      ]
+    },
+    {
+      "id": 18,
+      "type": "MusicCaptionView",
+      "pos": [
+        940,
+        1180
+      ],
+      "size": [
+        380,
+        260
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "summary_json",
+          "type": "STRING",
+          "link": 8
+        },
+        {
+          "name": "analysis_json",
+          "type": "STRING",
+          "link": 9
+        },
+        {
+          "name": "moss_json",
+          "type": "STRING",
+          "link": 10
+        }
+      ],
+      "outputs": [
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": [
+            11
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "tags",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 1
+        },
+        {
+          "name": "caption",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 2
+        },
+        {
+          "name": "lyrics",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 3
+        },
+        {
+          "name": "bpm",
+          "type": "INT",
+          "links": [
+            16
+          ],
+          "slot_index": 4
+        },
+        {
+          "name": "keyscale",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 5
+        },
+        {
+          "name": "vocal_type",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 6
+        },
+        {
+          "name": "chords",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 7
+        },
+        {
+          "name": "structure",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 8
+        }
+      ],
+      "title": "Music Caption Viewer",
+      "properties": {
+        "Node name for S&R": "MusicCaptionView"
+      },
+      "widgets_values": [
+        true
+      ]
+    },
+    {
+      "id": 19,
+      "type": "PreviewAny",
+      "pos": [
+        1360,
+        900
+      ],
+      "size": [
+        540,
+        440
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 11
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 0
+        }
+      ],
+      "title": "Analysis Report (BPM / Key / Vocals / Chords)",
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      }
+    },
+    {
+      "id": 3,
+      "type": "LoadAudio",
+      "pos": [
+        40,
+        560
+      ],
+      "size": [
+        420,
+        140
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            2,
+            3,
+            12,
+            25
+          ],
+          "slot_index": 0
+        }
+      ],
+      "title": "Music file",
+      "properties": {
+        "Node name for S&R": "LoadAudio"
+      },
+      "widgets_values": [
+        "input.wav"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "AudioContinueExtend",
+      "pos": [
+        40,
+        740
+      ],
+      "size": [
+        420,
+        170
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 12
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 13
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            22
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "FLOAT",
+          "type": "FLOAT",
+          "links": null,
+          "slot_index": 1
+        },
+        {
+          "name": "FLOAT",
+          "type": "FLOAT",
+          "links": null,
+          "slot_index": 2
+        },
+        {
+          "name": "FLOAT",
+          "type": "FLOAT",
+          "links": [
+            17
+          ],
+          "slot_index": 3
+        },
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": null,
+          "slot_index": 4
+        }
+      ],
+      "title": "Add seconds",
+      "properties": {
+        "Node name for S&R": "AudioContinueExtend"
+      },
+      "widgets_values": [
+        30.0,
+        "generate_new_only",
+        0.0
+      ]
+    },
+    {
+      "id": 5,
+      "type": "TextEncodeAceStepAudio1.5",
+      "pos": [
+        500,
+        300
+      ],
+      "size": [
+        600,
+        540
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 14
+        },
+        {
+          "name": "tags",
+          "type": "STRING",
+          "link": 15,
+          "widget": {
+            "name": "tags"
+          }
+        },
+        {
+          "name": "bpm",
+          "type": "INT",
+          "link": 16,
+          "widget": {
+            "name": "bpm"
+          }
+        },
+        {
+          "name": "duration",
+          "type": "FLOAT",
+          "link": 17,
+          "widget": {
+            "name": "duration"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            18,
+            20
+          ],
+          "slot_index": 0
+        }
+      ],
+      "title": "Style + lyrics",
+      "properties": {
+        "Node name for S&R": "TextEncodeAceStepAudio1.5"
+      },
+      "widgets_values": [
+        "instrumental, continues the existing song, same tempo, same key, same instruments, same mix and reverb, natural musical development, smooth transition, studio quality",
+        "",
+        31,
+        "randomize",
+        120,
+        120.0,
+        "4",
+        "en",
+        "C major",
+        true,
+        2.0,
+        0.85,
+        0.9,
+        0,
+        0.0
+      ]
+    },
+    {
+      "id": 6,
+      "type": "ConditioningZeroOut",
+      "pos": [
+        1140,
+        300
+      ],
+      "size": [
+        260,
+        60
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 18
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            21
+          ],
+          "slot_index": 0
+        }
+      ],
+      "title": "Negative (zero out)",
+      "properties": {
+        "Node name for S&R": "ConditioningZeroOut"
+      }
+    },
+    {
+      "id": 7,
+      "type": "KSampler",
+      "pos": [
+        1140,
+        400
+      ],
+      "size": [
+        330,
+        290
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 19
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 20
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 21
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 22
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            23
+          ],
+          "slot_index": 0
+        }
+      ],
+      "title": "Sampler",
+      "properties": {
+        "Node name for S&R": "KSampler"
+      },
+      "widgets_values": [
+        31,
+        "randomize",
+        50,
+        7.0,
+        "euler",
+        "simple",
+        1.0
+      ]
+    },
+    {
+      "id": 8,
+      "type": "VAEDecodeAudio",
+      "pos": [
+        1520,
+        400
+      ],
+      "size": [
+        250,
+        60
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 23
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 24
+        }
+      ],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            26
+          ],
+          "slot_index": 0
+        }
+      ],
+      "title": "Decode",
+      "properties": {
+        "Node name for S&R": "VAEDecodeAudio"
+      }
+    },
+    {
+      "id": 9,
+      "type": "AudioContinueStitch",
+      "pos": [
+        1520,
+        500
+      ],
+      "size": [
+        330,
+        110
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source_audio",
+          "type": "AUDIO",
+          "link": 25
+        },
+        {
+          "name": "continued_audio",
+          "type": "AUDIO",
+          "link": 26
+        }
+      ],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            27
+          ],
+          "slot_index": 0
+        }
+      ],
+      "title": "Stitch original + continuation",
+      "properties": {
+        "Node name for S&R": "AudioContinueStitch"
+      },
+      "widgets_values": [
+        1.0,
+        "highest"
+      ]
+    },
+    {
+      "id": 10,
+      "type": "SaveAudioAdvanced",
+      "pos": [
+        1900,
+        500
+      ],
+      "size": [
+        420,
+        130
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 27
+        }
+      ],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": null,
+          "slot_index": 0
+        }
+      ],
+      "title": "Save",
+      "properties": {
+        "Node name for S&R": "SaveAudioAdvanced"
+      },
+      "widgets_values": [
+        "audio-continue/audio",
+        "flac"
+      ]
+    },
+    {
+      "id": 11,
+      "type": "MarkdownNote",
+      "pos": [
+        1940,
+        900
+      ],
+      "size": [
+        620,
+        520
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Read me — Models & Setup",
+      "properties": {
+        "Node name for S&R": "MarkdownNote"
+      },
+      "widgets_values": [
+        "## Audio Continue + Music Captioner — ACE-Step 1.5 XL + MOSS-Music 8B\n\nThis workflow combines **music captioning / measurement** (bottom-left) with **ACE-Step 1.5 XL continuation** (top-right):\n* **DSP Measure** + **MOSS-Music Loader** analyse your uploaded file, show the full report in **Analysis Report**, and feed **`tags`** and **`bpm`** straight into **Style + lyrics** (`TextEncodeAceStepAudio1.5`).\n* Note: ComfyUI's `keyscale` widget on `TextEncodeAceStepAudio1.5` is a dropdown — read the detected key in **Analysis Report** and select it on `Style + lyrics` (or run through `audio_continue_tk.py`, which sets `keyscale` automatically).\n\n### Required models\n1. **ACE-Step 1.5 XL SFT** ([Comfy-Org/ace_step_1.5_ComfyUI_files](https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files/tree/main/split_files)):\n   * `ComfyUI/models/diffusion_models/acestep_v1.5_xl_sft_bf16.safetensors`\n   * `ComfyUI/models/text_encoders/qwen_0.6b_ace15.safetensors` (slot 1)\n   * `ComfyUI/models/text_encoders/qwen_4b_ace15.safetensors`   (slot 2)\n   * `ComfyUI/models/vae/ace_1.5_vae.safetensors`\n2. **MOSS-Music 8B Instruct (optional, ~17 GB, Apache-2.0):**\n   * Download: [https://huggingface.co/OpenMOSS-Team/MOSS-Music-8B-Instruct](https://huggingface.co/OpenMOSS-Team/MOSS-Music-8B-Instruct)\n   * Put in: `ComfyUI/models/moss_music/MOSS-Music-8B-Instruct/`\n   * Command: `hf download OpenMOSS-Team/MOSS-Music-8B-Instruct --local-dir ComfyUI/models/moss_music/MOSS-Music-8B-Instruct`\n   * Without MOSS-Music downloaded yet, `when_missing = skip (DSP only)` keeps the workflow running on DSP BPM/key/vocal measurements, and `keep_loaded = false` unloads MOSS from VRAM before ACE-Step samples.\n"
+      ]
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "MODEL"
+    ],
+    [
+      2,
+      3,
+      0,
+      15,
+      0,
+      "AUDIO"
+    ],
+    [
+      3,
+      3,
+      0,
+      16,
+      0,
+      "AUDIO"
+    ],
+    [
+      4,
+      14,
+      0,
+      16,
+      1,
+      "MOSS_MODEL"
+    ],
+    [
+      5,
+      15,
+      8,
+      17,
+      0,
+      "STRING"
+    ],
+    [
+      6,
+      16,
+      7,
+      17,
+      1,
+      "STRING"
+    ],
+    [
+      7,
+      16,
+      1,
+      17,
+      2,
+      "STRING"
+    ],
+    [
+      8,
+      17,
+      6,
+      18,
+      0,
+      "STRING"
+    ],
+    [
+      9,
+      15,
+      8,
+      18,
+      1,
+      "STRING"
+    ],
+    [
+      10,
+      16,
+      7,
+      18,
+      2,
+      "STRING"
+    ],
+    [
+      11,
+      18,
+      0,
+      19,
+      0,
+      "*"
+    ],
+    [
+      12,
+      3,
+      0,
+      4,
+      0,
+      "AUDIO"
+    ],
+    [
+      13,
+      13,
+      0,
+      4,
+      1,
+      "VAE"
+    ],
+    [
+      14,
+      12,
+      0,
+      5,
+      0,
+      "CLIP"
+    ],
+    [
+      15,
+      17,
+      0,
+      5,
+      1,
+      "STRING"
+    ],
+    [
+      16,
+      18,
+      4,
+      5,
+      2,
+      "INT"
+    ],
+    [
+      17,
+      4,
+      3,
+      5,
+      3,
+      "FLOAT"
+    ],
+    [
+      18,
+      5,
+      0,
+      6,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      19,
+      2,
+      0,
+      7,
+      0,
+      "MODEL"
+    ],
+    [
+      20,
+      5,
+      0,
+      7,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      21,
+      6,
+      0,
+      7,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      22,
+      4,
+      0,
+      7,
+      3,
+      "LATENT"
+    ],
+    [
+      23,
+      7,
+      0,
+      8,
+      0,
+      "LATENT"
+    ],
+    [
+      24,
+      13,
+      0,
+      8,
+      1,
+      "VAE"
+    ],
+    [
+      25,
+      3,
+      0,
+      9,
+      0,
+      "AUDIO"
+    ],
+    [
+      26,
+      8,
+      0,
+      9,
+      1,
+      "AUDIO"
+    ],
+    [
+      27,
+      9,
+      0,
+      10,
+      0,
+      "AUDIO"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 1.0,
+      "offset": [
+        0,
+        0
+      ]
+    }
+  },
+  "version": 0.4
+}

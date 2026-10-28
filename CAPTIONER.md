@@ -101,8 +101,11 @@ Honest limits of the DSP half:
   knows the difference, the DSP does not.
 * the register estimate is coarse (a median f0), not "male pop tenor with airy falsetto".
 
-The MOSS half is the opposite trade: slow, needs ~17 GB of weights and a second GPU
-process, but it *understands* the track, so use it when the DSP numbers look ambiguous.
+The MOSS half is the opposite trade: ~17 GB of 8B weights, loaded directly inside ComfyUI
+via `MusicCaptionMOSSLoader` (from `ComfyUI/models/moss_music/MOSS-Music-8B-Instruct` and
+unloaded automatically after captioning unless `keep_loaded = True`) or served externally
+via SGLang — slower than DSP, but it *understands* the track, so use it when you want rich
+instrumentation/genre captions, chords, structure, lyrics, or disambiguated vocal types.
 
 ### Prompt files
 
@@ -121,38 +124,66 @@ cp -r comfyui_music_caption    /path/to/ComfyUI/custom_nodes/
 # restart ComfyUI; nodes appear under "audio/caption"
 ```
 
-Nothing to pip install: numpy ships with ComfyUI, the MOSS client is `urllib`. Without a
-MOSS server the pack still works (DSP node only) — `MusicCaptionMOSS` logs the reason and
-returns empty strings instead of failing the graph.
+Nothing extra to pip install: `numpy`, `torch`, `transformers`, and `safetensors` already
+ship with ComfyUI. Without downloading MOSS-Music weights, the pack and both ComfyUI
+workflows (`workflows/music_caption_ui.json` and
+`workflows/ace15xl_audio_continue_caption_ui.json`) still run out of the box using DSP
+measurements (`when_missing = skip (DSP only)` on `MOSS-Music Loader`).
 
-Optional, for better captions:
+Optional, for rich captions / vocal description / chords / structure / lyrics (Apache-2.0,
+~17 GB):
+
+* **Instruct (recommended):** <https://huggingface.co/OpenMOSS-Team/MOSS-Music-8B-Instruct>
+* **Thinking (chain-of-thought variant):** <https://huggingface.co/OpenMOSS-Team/MOSS-Music-8B-Thinking>
 
 ```bash
-hf download OpenMOSS-Team/MOSS-Music-8B-Instruct --local-dir ./weights/MOSS-Music-8B-Instruct
+# Option A (recommended): local ComfyUI model folder — loaded by MOSS-Music Loader
+hf download OpenMOSS-Team/MOSS-Music-8B-Instruct \
+  --local-dir /path/to/ComfyUI/models/moss_music/MOSS-Music-8B-Instruct
+
+# Option B (alternative): external SGLang server
 sglang serve --model-path ./weights/MOSS-Music-8B-Instruct --trust-remote-code   # :30000
 ```
 
 Notes:
 
-* `transport = path` (default) hands the server an absolute path to the temp wav it wrote —
-  fastest, and correct when ComfyUI and SGLang share a filesystem. Otherwise use `base64`.
+* `MOSS-Music Loader` (`MusicCaptionMOSSLoader`) searches `ComfyUI/models/moss_music/`,
+  `ComfyUI/models/moss-music/`, `ComfyUI/models/LLM/`, and `$MOSS_MUSIC_DIR`. With
+  `keep_loaded = False` (default), it frees the 8B model from VRAM immediately after
+  captioning so ACE-Step 1.5 XL can run in the same workflow.
 * `segment = tail` (default) sends the last `max_seconds` of the track, i.e. the part being
   continued; `head`/`full` analyse the beginning/whole song.
-* point the app at the server with the **MOSS-Music server** field (default
-  `http://127.0.0.1:30000`); it is passed to the node as `server_url`.
+* If you use Option B (an external SGLang server), set **MOSS URL (opt.)** in the Tk app or
+  `server_url` on `MOSS-Music Loader` / `MusicCaptionMOSS` (`http://127.0.0.1:30000`).
 
-## 5. Node reference
+## 5. Node reference & ComfyUI workflows
 
-| Node | Inputs that matter | Outputs |
-| --- | --- | --- |
-| `MusicCaptionAnalyze` | `audio`, `max_seconds` (default 90, tail), `sections`, `extra_tags` | `tags`, `bpm`, `keyscale`, `key_confidence`, `bpm_confidence`, `vocal_presence`, `vocal_type`, `duration_seconds`, `analysis_json` |
-| `MusicCaptionMOSS` | `audio`, `server_url`, `mode` (`auto`/`attributes`/`caption`/`vocal`/`lyrics`/`key_bpm`), `transport`, `segment`, `max_seconds`, `max_tokens`, `temperature` | `caption`, `lyrics`, `vocal`, `bpm`, `keyscale`, `instrumental`, `structure`, `moss_json` |
-| `MusicCaptionMerge` | `analysis_json`, `moss_json`, `caption`, `vocal`, `lyrics` (all optional links), `prefer_numeric` (`dsp`/`model`), `extra_tags`, `keep_lyrics` | `tags`, `lyrics`, `bpm`, `keyscale`, `instrumental`, `vocal_type`, `summary_json` |
-| `MusicCaptionTap` | 12 optional `STRING` inputs, `label` | the values as a JSON array in its `ui.text` (that is what the app reads) |
+| Node | Display Name | Inputs that matter | Outputs |
+| --- | --- | --- | --- |
+| `MusicCaptionMOSSLoader` | `MOSS-Music Loader` | `model_name`, `backend` (`auto`/`transformers`/`sglang_server`/`disabled`), `device`, `dtype`, `keep_loaded`, `auto_download`, `when_missing` (`skip (DSP only)`/`error`), `server_url` | `moss_model`, `status` |
+| `MusicCaptionAnalyze` | `Music Caption (measure: bpm / key / vocals)` | `audio`, `max_seconds` (default 90, tail), `sections`, `extra_tags` | `tags`, `bpm`, `keyscale`, `key_confidence`, `bpm_confidence`, `vocal_presence`, `vocal_type`, `duration_seconds`, `analysis_json` |
+| `MusicCaptionMOSS` | `Music Caption (MOSS-Music)` | `audio`, optional `moss_model`, `server_url`, `mode` (`auto`/`attributes`/`caption`/`vocal`/`lyrics`/`key_bpm`), `transport`, `segment`, `max_seconds`, `max_tokens`, `temperature` | `caption`, `lyrics`, `vocal`, `bpm`, `keyscale`, `instrumental`, `structure`, `moss_json` |
+| `MusicCaptionMerge` | `Music Caption (build prompt)` | `analysis_json`, `moss_json`, `caption`, `vocal`, `lyrics` (all optional links), `prefer_numeric` (`dsp`/`model`), `extra_tags`, `keep_lyrics` | `tags`, `lyrics`, `bpm`, `keyscale`, `instrumental`, `vocal_type`, `summary_json` |
+| `MusicCaptionView` | `Music Caption Viewer` | `summary_json`, `analysis_json`, `moss_json`, `include_sections` | `report`, `tags`, `caption`, `lyrics`, `bpm` (clamped `10..300`), `keyscale`, `vocal_type`, `chords`, `structure` (+ on-node live text widget) |
+| `MusicCaptionTap` | `Music Caption (collect text)` | 12 optional `STRING` inputs, `label` | the values as a JSON array in its `ui.text` (that is what the app reads) |
 
-Every node also writes its result into the `ui.text` block of the history entry, which is
-how `audio_continue_tk.py` picks the answer up without a preview node. `MusicCaptionTap`
-exists for the opposite direction: it makes *other packs'* captioners readable the same way.
+All sink/analysis nodes (`MusicCaptionAnalyze`, `MusicCaptionMOSS`, `MusicCaptionMerge`,
+`MusicCaptionView`, `MusicCaptionTap`) set `OUTPUT_NODE = True` and write their output into
+ComfyUI's `/history` `ui.text` block, so standalone caption prompts work directly without
+`prompt_no_outputs` errors.
+
+Shipped ComfyUI workflows (drag the `*_ui.json` files onto the ComfyUI canvas; each includes
+an on-canvas `MarkdownNote` with the HuggingFace download links and folder instructions):
+
+* `workflows/music_caption_ui.json` (`music_caption_api.json`) — standalone music captioner
+  & analyzer (`LoadAudio` → `MOSS-Music Loader` + `MusicCaptionAnalyze` + `MusicCaptionMOSS`
+  → `MusicCaptionMerge` → `MusicCaptionView` + core `PreviewAny` panels for the full report,
+  raw DSP JSON, and raw MOSS JSON).
+* `workflows/ace15xl_audio_continue_caption_ui.json`
+  (`ace15xl_audio_continue_caption_api.json`) — combined caption + ACE-Step 1.5 XL audio
+  continuation workflow, wiring merged tags and clamped BPM straight into
+  `TextEncodeAceStepAudio1.5` while displaying the full caption report (including detected
+  key/scale) on the canvas.
 
 ## 6. In the app
 
@@ -160,14 +191,17 @@ exists for the opposite direction: it makes *other packs'* captioners readable t
 Prompt source
   Prompt file         [ song.prompt.txt        ] [Browse...] [Find next to audio]
   [x] append the prompt file to the description (unticked: replace it)   [x] look for one automatically
-  Captioner           [ auto — MusicCaptionMerge ▾ ] [Analyse source] [Refresh]
-  [ ] run the captioner before Generate      [ ] fill empty lyrics from it
-  MOSS-Music server   [ http://127.0.0.1:30000 ]
+  Captioner           [ auto ▾ ]                 [Analyse source] [Refresh]
+  [ ] run the captioner before Generate          [ ] fill empty lyrics from it
+  MOSS URL (opt.)     [ http://127.0.0.1:30000 ]
 ```
 
-* **Check setup** lists the captioners it found and what it will use.
-* **Analyse source** runs the captioner now, prints the results in the log and fills the BPM
-  and key fields, so you can eyeball them before spending GPU time.
+* **Check setup** lists the captioners it found and whether local `MOSS-Music` weights are
+  installed in `ComfyUI/models/moss_music/`.
+* **Analyse source** wires `MusicCaptionMOSSLoader` + `MusicCaptionAnalyze` +
+  `MusicCaptionMOSS` + `MusicCaptionMerge`, runs them in ComfyUI, fills **BPM**, **Key**,
+  and **Music description** (plus **Lyrics** when `fill empty lyrics from it` is ticked),
+  and prints all findings in the log.
 * **run the captioner before Generate** does the same as part of the job. If the captioner is
   missing or fails, generation continues with your own description (the log says why) —
   captioning never blocks a render.
@@ -185,10 +219,10 @@ python3 audio_continue_tk.py --dry-run --audio song.flac --replace-prompt --capt
 
 ## 7. Known gaps / next steps
 
-1. **MOSS-Music in-process.** Right now the model must be served by SGLang (recommended by
-   OpenMOSS anyway). An in-process `transformers` path would need the `MossMusicProcessor`
-   API and a second venv — `DrunkTramp/comfyui-moss-audio` shows the subprocess pattern if
-   someone wants it.
+1. **Quantized MOSS-Music weights.** `MOSS-Music Loader` currently loads the official bf16 /
+   fp16 safetensors shards (~17 GB VRAM while captioning, freed before ACE-Step runs when
+   `keep_loaded = False`). 4-bit / 8-bit quantization would bring local MOSS captioning down
+   to 8 GB GPUs.
 2. **Vocal separation as a cue.** Demucs stems (already available via
    `audio-separation-nodes-comfyui` / `FL_Audio_Separation`) would make vocal presence and
    register far more reliable than a single-band heuristic, at the cost of a model download.

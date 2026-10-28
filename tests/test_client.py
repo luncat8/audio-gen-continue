@@ -20,6 +20,10 @@ from fake_comfyui import FakeState, start_server  # noqa: E402
 
 API_WORKFLOW = os.path.join(ROOT, "workflows", "ace15xl_audio_continue_api.json")
 UI_WORKFLOW = os.path.join(ROOT, "workflows", "ace15xl_audio_continue_ui.json")
+CAPTION_API = os.path.join(ROOT, "workflows", "music_caption_api.json")
+CAPTION_UI = os.path.join(ROOT, "workflows", "music_caption_ui.json")
+XL_CAPTION_API = os.path.join(ROOT, "workflows", "ace15xl_audio_continue_caption_api.json")
+XL_CAPTION_UI = os.path.join(ROOT, "workflows", "ace15xl_audio_continue_caption_ui.json")
 ARCHIVE_API = os.path.join(ROOT, "workflows", "archive", "ace15_audio_continue_turbo_aio_api.json")
 ARCHIVE_UI = os.path.join(ROOT, "workflows", "archive", "ace15_audio_continue_turbo_aio_ui.json")
 
@@ -66,6 +70,47 @@ class TestWorkflowFiles(unittest.TestCase):
                     self.assertIn(value[0], wf, f"{nid}.{key} points at a missing node")
         self.assertTrue(by_class(wf, "CheckpointLoaderSimple"))
         self.assertTrue(os.path.isfile(ARCHIVE_UI))
+
+    def test_music_caption_workflows_have_loader_viewer_and_hf_note(self):
+        for api_path, ui_path in ((CAPTION_API, CAPTION_UI), (XL_CAPTION_API, XL_CAPTION_UI)):
+            wf = load(api_path)
+            for nid, node in wf.items():
+                for key, value in node["inputs"].items():
+                    if isinstance(value, list) and len(value) == 2 and isinstance(value[1], int):
+                        self.assertIn(value[0], wf, f"{api_path}:{nid}.{key} points at missing node")
+            self.assertTrue(by_class(wf, "MusicCaptionMOSSLoader"))
+            self.assertTrue(by_class(wf, "MusicCaptionAnalyze"))
+            self.assertTrue(by_class(wf, "MusicCaptionMOSS"))
+            self.assertTrue(by_class(wf, "MusicCaptionMerge"))
+            self.assertTrue(by_class(wf, "MusicCaptionView"))
+
+            ui = load(ui_path)
+            by_id = {n["id"]: n for n in ui["nodes"]}
+            for link in ui["links"]:
+                _, src, _, dst, _, _ = link
+                self.assertIn(src, by_id)
+                self.assertIn(dst, by_id)
+            notes = [
+                " ".join(str(v) for v in (n.get("widgets_values") or []))
+                for n in ui["nodes"]
+                if n.get("type") == "MarkdownNote"
+            ]
+            self.assertTrue(notes, f"{ui_path} has no MarkdownNote")
+            joined = "\n".join(notes)
+            self.assertIn("https://huggingface.co/OpenMOSS-Team/MOSS-Music-8B-Instruct", joined)
+            self.assertIn("models/moss_music", joined)
+
+    def test_combined_caption_continue_workflow_preserves_links_on_patch(self):
+        wf = load(XL_CAPTION_API)
+        settings = app.Settings(tags="warm tape saturation", add_seconds=24.0, caption_fill_lyrics=True)
+        patched = app.patch_workflow(wf, settings, uploaded_name="song.flac")
+        encode = list(by_class(patched, "TextEncodeAceStepAudio1.5").values())[0]["inputs"]
+        # tags and bpm stay wired to MusicCaptionMerge / MusicCaptionView instead of being clobbered
+        self.assertIsInstance(encode["tags"], list)
+        self.assertIsInstance(encode["bpm"], list)
+        merge = list(by_class(patched, "MusicCaptionMerge").values())[0]["inputs"]
+        self.assertEqual(merge["extra_tags"], "warm tape saturation")
+        self.assertTrue(merge["keep_lyrics"])
 
     def test_default_workflow_is_the_xl_split_graph(self):
         wf = load(API_WORKFLOW)
@@ -273,11 +318,28 @@ class TestPromptRejected(FakeServerCase):
             self.client.queue_prompt({"1": {"class_type": "LoadAudio", "inputs": {}}})
 
 
+class TestPromptNoOutputs(FakeServerCase):
+    def test_prompt_without_output_node_is_rejected_like_comfyui(self):
+        with self.assertRaises(app.ComfyError) as ctx:
+            self.client.queue_prompt({"1": {"class_type": "LoadAudio", "inputs": {"audio": "input.wav"}}})
+        self.assertIn("prompt_no_outputs", str(ctx.exception))
+
+    def test_caption_workflows_have_valid_outputs(self):
+        for path in (CAPTION_API, XL_CAPTION_API):
+            prompt_id = self.client.queue_prompt(load(path))
+            self.assertTrue(prompt_id)
+
+
 class TestRunFails(FakeServerCase):
     state_kwargs = {"fail_prompt": True}
 
     def test_error_status(self):
-        prompt_id = self.client.queue_prompt({"1": {"class_type": "LoadAudio", "inputs": {}}})
+        prompt_id = self.client.queue_prompt(
+            {
+                "1": {"class_type": "LoadAudio", "inputs": {"audio": "input.wav"}},
+                "2": {"class_type": "SaveAudio", "inputs": {"audio": ["1", 0], "filename_prefix": "a"}},
+            }
+        )
         with self.assertRaises(app.ComfyError):
             self.client.wait(prompt_id, poll=0.05, max_wait=10)
 

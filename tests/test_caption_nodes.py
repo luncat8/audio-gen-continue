@@ -319,7 +319,14 @@ class TestNodeRegistration(unittest.TestCase):
     def test_every_node_is_mapped(self):
         self.assertEqual(
             set(nodes.NODE_CLASS_MAPPINGS),
-            {"MusicCaptionAnalyze", "MusicCaptionMOSS", "MusicCaptionMerge", "MusicCaptionTap"},
+            {
+                "MusicCaptionMOSSLoader",
+                "MusicCaptionAnalyze",
+                "MusicCaptionMOSS",
+                "MusicCaptionMerge",
+                "MusicCaptionView",
+                "MusicCaptionTap",
+            },
         )
         for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
             self.assertTrue(hasattr(cls, "INPUT_TYPES"), name)
@@ -327,11 +334,291 @@ class TestNodeRegistration(unittest.TestCase):
             self.assertEqual(len(cls.RETURN_TYPES), len(cls.RETURN_NAMES), name)
             self.assertTrue(callable(getattr(cls, cls.FUNCTION)), name)
 
+    def test_sink_nodes_set_output_node_true_and_match_fake_comfyui(self):
+        """Regression guard for ComfyUI's prompt_no_outputs HTTP 400 error."""
+        import comfyui_music_caption as pkg
+        from fake_comfyui import NODES as FAKE_NODES
+
+        for sink_name in (
+            "MusicCaptionAnalyze",
+            "MusicCaptionMOSS",
+            "MusicCaptionMerge",
+            "MusicCaptionView",
+            "MusicCaptionTap",
+        ):
+            cls = nodes.NODE_CLASS_MAPPINGS[sink_name]
+            self.assertTrue(getattr(cls, "OUTPUT_NODE", False), f"{sink_name} must set OUTPUT_NODE = True")
+            self.assertTrue(FAKE_NODES[sink_name].get("output_node"), f"fake_comfyui.{sink_name}")
+        self.assertFalse(getattr(nodes.MusicCaptionMOSSLoader, "OUTPUT_NODE", False))
+        for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
+            self.assertEqual(list(cls.RETURN_TYPES), FAKE_NODES[name]["output"], name)
+            self.assertEqual(list(cls.RETURN_NAMES), FAKE_NODES[name]["output_name"], name)
+        self.assertEqual(pkg.WEB_DIRECTORY, "./web")
+        self.assertTrue(
+            os.path.isfile(os.path.join(ROOT, "comfyui_music_caption", "web", "music_caption.js"))
+        )
+
     def test_links_declared_in_object_info_match_return_types(self):
         """The app links these by index - keep the order stable."""
         self.assertEqual(nodes.MusicCaptionAnalyze.RETURN_NAMES[8], "analysis_json")
         self.assertEqual(nodes.MusicCaptionMOSS.RETURN_NAMES[7], "moss_json")
         self.assertEqual(nodes.MusicCaptionMerge.RETURN_NAMES[6], "summary_json")
+
+
+class TestMossLoaderAndLocal(unittest.TestCase):
+    def _make_fake_model_dir(self, base_dir, name="MOSS-Music-8B-Instruct", complete=True):
+        from comfyui_music_caption import moss_local
+
+        model_dir = os.path.join(base_dir, name)
+        os.makedirs(model_dir, exist_ok=True)
+        for fname in (*moss_local.REQUIRED_CODE_FILES, "tokenizer_config.json", "vocab.json", "merges.txt"):
+            with open(os.path.join(model_dir, fname), "w", encoding="utf-8") as fh:
+                fh.write("{}" if fname.endswith(".json") else "# stub\n")
+        index_path = os.path.join(model_dir, "model.safetensors.index.json")
+        with open(index_path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "weight_map": {
+                        "layer.0": "model-00001-of-00002.safetensors",
+                        "layer.1": "model-00002-of-00002.safetensors",
+                    }
+                },
+                fh,
+            )
+        with open(os.path.join(model_dir, "model-00001-of-00002.safetensors"), "wb") as fh:
+            fh.write(b"0")
+        if complete:
+            with open(os.path.join(model_dir, "model-00002-of-00002.safetensors"), "wb") as fh:
+                fh.write(b"0")
+        return model_dir
+
+    def test_inspect_model_dir_checks_all_indexed_shards(self):
+        import tempfile
+        from comfyui_music_caption import moss_local
+
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = moss_local.inspect_model_dir(os.path.join(tmp, "nope"))
+            self.assertFalse(missing["ok"])
+            self.assertEqual(missing["state"], "missing")
+
+            partial_dir = self._make_fake_model_dir(tmp, name="partial", complete=False)
+            partial = moss_local.inspect_model_dir(partial_dir)
+            self.assertFalse(partial["ok"])
+            self.assertEqual(partial["state"], "incomplete")
+            self.assertIn("model-00002-of-00002.safetensors", partial["missing"])
+
+            ready_dir = self._make_fake_model_dir(tmp, name="ready", complete=True)
+            ready = moss_local.inspect_model_dir(ready_dir)
+            self.assertTrue(ready["ok"])
+            self.assertEqual(ready["state"], "ready")
+            self.assertEqual(ready["missing"], [])
+
+    def test_loader_skips_cleanly_or_errors_with_hf_link_when_missing(self):
+        import tempfile
+
+        loader = nodes.MusicCaptionMOSSLoader()
+        with tempfile.TemporaryDirectory() as tmp:
+            old_env = os.environ.get("MOSS_MUSIC_DIR")
+            os.environ["MOSS_MUSIC_DIR"] = tmp
+            try:
+                handle, status = loader.load_model(
+                    model_name="MOSS-Music-8B-Instruct",
+                    backend="auto",
+                    when_missing="skip (DSP only)",
+                    server_url="http://127.0.0.1:9",
+                )
+                self.assertFalse(handle["ok"])
+                self.assertEqual(handle["backend"], "missing")
+                self.assertIn("huggingface.co/OpenMOSS-Team/MOSS-Music-8B-Instruct", status)
+
+                # Downstream MusicCaptionMOSS skips without hitting HTTP when loader says missing
+                moss_node = nodes.MusicCaptionMOSS()
+                out = moss_node.describe(
+                    audio_dict(beat_track(seconds=1.5)),
+                    moss_model=handle,
+                    server_url="http://127.0.0.1:9",
+                )
+                payload = json.loads(out["result"][7])
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["backend"], "missing")
+
+                with self.assertRaises(RuntimeError) as ctx:
+                    loader.load_model(
+                        model_name="MOSS-Music-8B-Instruct",
+                        backend="transformers",
+                        when_missing="error",
+                    )
+                self.assertIn("https://huggingface.co/OpenMOSS-Team/MOSS-Music-8B-Instruct", str(ctx.exception))
+            finally:
+                if old_env is None:
+                    os.environ.pop("MOSS_MUSIC_DIR", None)
+                else:
+                    os.environ["MOSS_MUSIC_DIR"] = old_env
+
+    def test_loader_discovers_local_weights_and_moss_node_runs_in_process(self):
+        import tempfile
+        from comfyui_music_caption import moss_local
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = self._make_fake_model_dir(tmp)
+            old_env = os.environ.get("MOSS_MUSIC_DIR")
+            os.environ["MOSS_MUSIC_DIR"] = tmp
+            orig_analyse = moss_local.analyse_waveform
+            try:
+                schema = nodes.MusicCaptionMOSSLoader.INPUT_TYPES()
+                tooltip = schema["required"]["model_name"][1]["tooltip"]
+                self.assertIn("Installed in models/moss_music: MOSS-Music-8B-Instruct", tooltip)
+
+                loader = nodes.MusicCaptionMOSSLoader()
+                handle, status = loader.load_model(model_name="MOSS-Music-8B-Instruct", backend="auto")
+                self.assertEqual(handle["backend"], "transformers")
+                self.assertTrue(handle["ok"])
+                self.assertEqual(handle["model_dir"], model_dir)
+                self.assertIn(model_dir, status)
+
+                def fake_local_analyse(waveform, sample_rate, **kwargs):
+                    self.assertEqual(kwargs["model_dir"], model_dir)
+                    self.assertEqual(sample_rate, RATE)
+                    return {
+                        "ok": True,
+                        "backend": "transformers",
+                        "caption": "dreamy synth-pop with shimmering arpeggios and warm female vocals",
+                        "tags": "synth-pop, shimmering arpeggios, warm bass",
+                        "bpm": 118,
+                        "keyscale": "F# minor",
+                        "instrumental": False,
+                        "vocal": "warm breathy female lead",
+                        "vocal_type": "female",
+                        "structure": "intro -> verse -> chorus",
+                        "chords": "F#m - D - A - E",
+                        "language": "English",
+                        "lyrics": "[Verse]\nNeon lights across the rain",
+                        "raw": "{}",
+                    }
+
+                moss_local.analyse_waveform = fake_local_analyse
+                moss_node = nodes.MusicCaptionMOSS()
+                out = moss_node.describe(
+                    audio_dict(beat_track(seconds=2.0)),
+                    moss_model=handle,
+                    server_url="http://127.0.0.1:9",
+                    mode="auto",
+                )
+                caption, lyrics, vocal, bpm, keyscale, instrumental, structure, blob = out["result"]
+                self.assertIn("synth-pop", caption)
+                self.assertIn("Neon lights", lyrics)
+                self.assertEqual(bpm, 118)
+                self.assertEqual(keyscale, "F# minor")
+                self.assertFalse(instrumental)
+                self.assertEqual(structure, "intro -> verse -> chorus")
+                self.assertEqual(json.loads(blob)["chords"], "F#m - D - A - E")
+            finally:
+                moss_local.analyse_waveform = orig_analyse
+                if old_env is None:
+                    os.environ.pop("MOSS_MUSIC_DIR", None)
+                else:
+                    os.environ["MOSS_MUSIC_DIR"] = old_env
+
+    def test_analyse_waveform_runs_attributes_plus_lyrics_and_unloads_when_requested(self):
+        import tempfile
+        from comfyui_music_caption import moss_local
+
+        calls = []
+
+        class FakeRunner:
+            def __init__(self):
+                self.model = object()
+                self.processor = object()
+
+            def ask(self, waveform, sample_rate, prompt, max_tokens, temperature):
+                calls.append(prompt)
+                if len(calls) == 1:
+                    return (
+                        "<think>Listening to harmony and vocals...</think>\n"
+                        + json.dumps(
+                            {
+                                "caption": "lush indie pop with jangly guitars",
+                                "bpm": 112,
+                                "key": "G major",
+                                "vocal_present": True,
+                                "vocal_type": "female",
+                                "structure": "verse -> chorus",
+                                "chords": "G - Em - C - D",
+                            }
+                        )
+                    )
+                return "[Verse]\nSunlight through the windowpane"
+
+        fake_runner = FakeRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            moss_local._CACHE["key"] = (os.path.abspath(tmp), "auto", "auto")
+            moss_local._CACHE["runner"] = fake_runner
+            try:
+                res = moss_local.analyse_waveform(
+                    beat_track(seconds=1.5),
+                    RATE,
+                    model_dir=tmp,
+                    keep_loaded=False,
+                    mode="auto",
+                )
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(res["bpm"], 112)
+                self.assertEqual(res["key"], "G major")
+                self.assertEqual(res["chords"], "G - Em - C - D")
+                self.assertIn("Sunlight through the windowpane", res["lyrics"])
+                self.assertFalse(hasattr(fake_runner, "model"))
+                self.assertIsNone(moss_local._CACHE["runner"])
+            finally:
+                moss_local.unload_cached()
+
+
+class TestViewNode(unittest.TestCase):
+    def test_viewer_formats_all_fields_and_clamps_bpm(self):
+        analyze_out = nodes.MusicCaptionAnalyze().analyze(audio_dict(beat_track(seconds=8.0)))
+        analysis_json = analyze_out["result"][8]
+        moss_json = json.dumps(
+            {
+                "ok": True,
+                "backend": "transformers",
+                "caption": "intimate acoustic piece with fingerpicked guitar",
+                "tags": "acoustic, fingerpicked guitar, warm",
+                "bpm": 0,
+                "keyscale": "A minor",
+                "instrumental": False,
+                "vocal_type": "female",
+                "structure": "intro -> verse",
+                "chords": "Am - F - C - G",
+                "language": "English",
+                "lyrics": "Soft morning light",
+            }
+        )
+        merged = nodes.MusicCaptionMerge().merge(
+            prefer_numeric="dsp",
+            analysis_json=analysis_json,
+            moss_json=moss_json,
+            keep_lyrics=False,
+        )["result"]
+        summary_json = merged[6]
+
+        viewed = nodes.MusicCaptionView().view(
+            summary_json=summary_json,
+            analysis_json=analysis_json,
+            moss_json=moss_json,
+            include_sections=True,
+        )
+        report, tags, caption, lyrics, bpm, keyscale, vocal_type, chords, structure = viewed["result"]
+        self.assertIn("BPM:", report)
+        self.assertIn("Key / Scale:  A minor", report)
+        self.assertIn("Chords:       Am - F - C - G", report)
+        self.assertIn("Structure:    intro -> verse", report)
+        self.assertIn("Soft morning light", report)
+        self.assertIn("Sections:", report)
+        self.assertGreaterEqual(bpm, 10)
+        self.assertLessEqual(bpm, 300)
+        self.assertEqual(keyscale, "A minor")
+        self.assertEqual(lyrics, "Soft morning light")
+        self.assertEqual(chords, "Am - F - C - G")
+        self.assertEqual(viewed["ui"]["text"][0], report)
 
 
 if __name__ == "__main__":
